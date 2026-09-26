@@ -122,26 +122,68 @@ def parse_loot_item(embed: discord.Embed) -> str:
         if name in {"loot", "items", "drop", "drops", "loot items"} and value:
             candidates.append(value)
 
-    if not candidates and embed.description:
+    # Older Dink embeds put the actual loot line directly in the description.
+    if embed.description:
         candidates.append(embed.description)
 
     for value in candidates:
         items = []
+
         for raw in value.splitlines():
             line = re.sub(r"[*_`]", "", raw.strip()).strip()
             if not line:
                 continue
 
-            # Ignore Dink metadata and the notification sentence.
-            if re.match(r"^(?:total\s+value|completion\s+count|(?:van|from))\s*:", line, re.I):
+            # Skip Dink metadata and notification text.
+            if re.match(
+                r"^(?:total\s+value|completion\s+count|(?:van|from))\s*:",
+                line,
+                re.I,
+            ):
                 continue
-            if re.search(r"\b(?:heeft een klapper geslagen|got a drop|has looted)\b", line, re.I):
+            if re.search(
+                r"\b(?:heeft een klapper geslagen|got a drop|has looted)\b",
+                line,
+                re.I,
+            ):
                 continue
 
-            # Strip the GP value and quantity from the item line.
-            line = re.sub(r"\s*[—-]\s*[\d.,]+\s*[KMB]?\s*GP\s*$", "", line, flags=re.I)
-            line = re.sub(r"\s+\(?[\d.,]+\s*[KMB]?\s*GP\)?\s*$", "", line, flags=re.I)
-            line = re.sub(r"\s*[x×]\s*\d+\s*$", "", line, flags=re.I).strip()
+            # Actual Dink format, e.g.:
+            # "1 x Ancient totem (997K)"
+            # "58 x Runite ore (585K)"
+            m = re.match(
+                r"^\d+\s*[x×]\s*(.+?)\s*\(\s*[\d.,]+\s*[KMB]?\s*(?:GP)?\s*\)\s*$",
+                line,
+                re.I,
+            )
+            if m:
+                item_name = m.group(1).strip()
+                if item_name:
+                    items.append(item_name)
+                    continue
+
+            # Other possible formats:
+            # "Ancient totem — 997K GP"
+            # "Ancient totem (997K)"
+            line = re.sub(
+                r"\s*[—-]\s*[\d.,]+\s*[KMB]?\s*GP\s*$",
+                "",
+                line,
+                flags=re.I,
+            )
+            line = re.sub(
+                r"\s*\(\s*[\d.,]+\s*[KMB]?\s*(?:GP)?\s*\)\s*$",
+                "",
+                line,
+                flags=re.I,
+            )
+            line = re.sub(
+                r"\s+\(?[\d.,]+\s*[KMB]?\s*GP\)?\s*$",
+                "",
+                line,
+                flags=re.I,
+            )
+            line = re.sub(r"^\d+\s*[x×]\s*", "", line, flags=re.I).strip()
 
             if line:
                 items.append(line)
@@ -218,6 +260,7 @@ def parse_loot(message: discord.Message):
         "value_gp": total_value,
         "completion_count": completion_count,
         "source": source,
+        "loot_item": loot_item,
     }
 
 
