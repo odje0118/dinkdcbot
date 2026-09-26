@@ -43,6 +43,7 @@ def init_db():
             value_gp INTEGER DEFAULT 0,
             completion_count INTEGER DEFAULT 0,
             source TEXT DEFAULT '',
+            loot_item TEXT DEFAULT '',
             created_at TEXT NOT NULL
         );
 
@@ -54,6 +55,9 @@ def init_db():
             value TEXT NOT NULL
         );
     """)
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(events)").fetchall()}
+    if "loot_item" not in columns:
+        conn.execute("ALTER TABLE events ADD COLUMN loot_item TEXT DEFAULT ''")
     conn.commit()
     conn.close()
 
@@ -108,6 +112,34 @@ def get_embed_text(embed: discord.Embed) -> str:
     return "\n".join(parts)
 
 
+def parse_loot_item(embed: discord.Embed) -> str:
+    """Extract item name(s) from a Dink loot embed."""
+    candidates = []
+    for field in embed.fields:
+        name = (field.name or "").strip().casefold()
+        value = (field.value or "").strip()
+        if name in {"loot", "items", "drop", "drops", "loot items"} and value:
+            candidates.append(value)
+    if not candidates and embed.description:
+        candidates.append(embed.description)
+
+    for value in candidates:
+        cleaned = []
+        for raw in value.splitlines():
+            line = raw.strip()
+            if not line or re.match(r"^(?:total value|completion count|(?:van|from)\s*:)", line, re.I):
+                continue
+            line = re.sub(r"[*_`]", "", line).strip()
+            line = re.sub(r"\s*[—-]\s*[\d.,]+\s*[KMB]?\s*GP\s*$", "", line, flags=re.I)
+            line = re.sub(r"\s*\(?[\d.,]+\s*[KMB]?\s*GP\)?\s*$", "", line, flags=re.I)
+            line = re.sub(r"\s*[x×]\s*\d+\s*$", "", line, flags=re.I).strip()
+            if line:
+                cleaned.append(line)
+        if cleaned:
+            return ", ".join(cleaned)
+    return ""
+
+
 def parse_loot(message: discord.Message):
     if not message.embeds:
         return None
@@ -143,6 +175,7 @@ def parse_loot(message: discord.Message):
     completion_count = 0
     total_value = 0
     source = ""
+    loot_item = parse_loot_item(embed)
 
     for field in embed.fields:
         name = (field.name or "").strip().lower()
@@ -239,8 +272,8 @@ async def save_event(message: discord.Message, parsed: dict) -> bool:
             """
             INSERT OR IGNORE INTO events
             (message_id, channel_id, event_type, player, value_gp,
-             completion_count, source, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             completion_count, source, loot_item, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 message.id,
@@ -250,6 +283,7 @@ async def save_event(message: discord.Message, parsed: dict) -> bool:
                 parsed["value_gp"],
                 parsed["completion_count"],
                 parsed["source"],
+                parsed.get("loot_item", ""),
                 message.created_at.isoformat(),
             ),
         )
@@ -480,6 +514,7 @@ def get_biggest_drop_per_player(limit=15):
                 e.player,
                 e.value_gp,
                 e.source,
+                e.loot_item,
                 e.created_at,
                 e.message_id,
                 e.channel_id,
@@ -490,7 +525,7 @@ def get_biggest_drop_per_player(limit=15):
             FROM events e
             WHERE e.event_type='loot' AND e.value_gp > 0
         )
-        SELECT player, value_gp, source, created_at, message_id, channel_id
+        SELECT player, value_gp, source, loot_item, created_at, message_id, channel_id
         FROM ranked
         WHERE rn = 1
         ORDER BY value_gp DESC, player COLLATE NOCASE
@@ -687,6 +722,7 @@ async def update_leaderboard():
             guild_id = getattr(getattr(channel, "guild", None), "id", None)
             for i, row in enumerate(biggest_per_player_rows, start=1):
                 prefix = medals[i-1] if i <= 3 else f"**{i}.**"
+                item = f" • {row['loot_item']}" if row["loot_item"] else ""
                 source = f" • {row['source']}" if row["source"] else ""
                 jump_url = (
                     f"https://discord.com/channels/{guild_id}/"
@@ -694,7 +730,7 @@ async def update_leaderboard():
                     if guild_id else "https://discord.com"
                 )
                 lines.append(
-                    f"{prefix} **{row['player']}** — **{format_gp(row['value_gp'])} GP**{source} • [View drop]({jump_url})"
+                    f"{prefix} **{row['player']}** — **{format_gp(row['value_gp'])} GP**{item} • [View drop]({jump_url})"
                 )
             # One list in the embed description — no (2/3), (3/3) field labels.
             biggest_player_embed.description = "\n".join(lines)
@@ -703,8 +739,8 @@ async def update_leaderboard():
 
         # -------------------- MOST GP BY ACTIVITY --------------------
         activity_embed = discord.Embed(
-            title="📍 MOST GP BY ACTIVITY",
-            description="For each player, the activity/source where they have accumulated the most loot GP.",
+            title="📍 MOST GP EARNED AT",
+            description="For each player, where they have accumulated the most loot GP.",
             color=discord.Color.teal(),
             timestamp=datetime.now(timezone.utc),
         )
