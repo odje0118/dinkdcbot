@@ -156,6 +156,7 @@ def parse_loot(message: discord.Message):
             total_value = parse_gp(value)
 
     if embed.description:
+        # Dink can use either the Dutch or English source label.
         source_match = re.search(r"(?:Van|From):\s*(.+)", embed.description, re.I)
         if source_match:
             source = source_match.group(1).strip()
@@ -407,198 +408,6 @@ def get_player_stats(player: str):
     conn.close()
     return row
 
-
-
-def get_player_loot_events(player: str):
-    """Return all stored loot events for a player, newest first."""
-    conn = db()
-    rows = conn.execute(
-        """
-        SELECT message_id, channel_id, player, value_gp, source, created_at
-        FROM events
-        WHERE event_type='loot'
-          AND LOWER(REPLACE(player, ' ', '')) = LOWER(REPLACE(?, ' ', ''))
-        ORDER BY datetime(created_at) DESC, message_id DESC
-        """,
-        (player,),
-    ).fetchall()
-    conn.close()
-    return rows
-
-
-class PlayerLootView(discord.ui.View):
-    """Paginated view for all loot drops belonging to one player."""
-
-    def __init__(self, player: str, rows, owner_id: int):
-        super().__init__(timeout=300)
-        self.player = player
-        self.rows = list(rows)
-        self.owner_id = owner_id
-        self.page = 0
-        self.per_page = 5
-        self._rebuild_items()
-
-    @property
-    def total_pages(self):
-        return max(1, (len(self.rows) + self.per_page - 1) // self.per_page)
-
-    def _rebuild_items(self):
-        self.clear_items()
-        start = self.page * self.per_page
-        page_rows = self.rows[start:start + self.per_page]
-
-        # Discord URL buttons are limited to 5 per action row. One button per
-        # drop makes it easy to jump directly to the original Dink message.
-        for index, row in enumerate(page_rows, start=start + 1):
-            guild_id = None
-            # The channel is always the configured DROPS channel, so the guild
-            # can be obtained from the bot's cached channel when available.
-            drops_channel = bot.get_channel(DROPS_CHANNEL_ID)
-            if drops_channel and getattr(drops_channel, "guild", None):
-                guild_id = drops_channel.guild.id
-
-            url = (
-                f"https://discord.com/channels/{guild_id}/{row['channel_id']}/{row['message_id']}"
-                if guild_id else "https://discord.com"
-            )
-            source = row["source"] or "Unknown / Other"
-            label = f"Drop {index}"
-            button = discord.ui.Button(
-                label=label,
-                style=discord.ButtonStyle.link,
-                url=url,
-                emoji="🔎",
-            )
-            self.add_item(button)
-
-        previous_button = discord.ui.Button(
-            label="Previous",
-            style=discord.ButtonStyle.secondary,
-            emoji="◀️",
-            disabled=self.page <= 0,
-            row=3,
-        )
-        previous_button.callback = self.previous_page
-        self.add_item(previous_button)
-
-        next_button = discord.ui.Button(
-            label="Next",
-            style=discord.ButtonStyle.secondary,
-            emoji="▶️",
-            disabled=self.page >= self.total_pages - 1,
-            row=3,
-        )
-        next_button.callback = self.next_page
-        self.add_item(next_button)
-
-        close_button = discord.ui.Button(
-            label="Close",
-            style=discord.ButtonStyle.danger,
-            row=3,
-        )
-        close_button.callback = self.close_view
-        self.add_item(close_button)
-
-    def build_embed(self):
-        total_value = sum(row["value_gp"] or 0 for row in self.rows)
-        start = self.page * self.per_page
-        page_rows = self.rows[start:start + self.per_page]
-
-        embed = discord.Embed(
-            title=f"💰 ALL LOOT — {self.player}",
-            description=(
-                f"**{len(self.rows):,}** recorded loot drops\n"
-                f"**{format_gp(total_value)} GP** total value\n\n"
-                "⚠️ Dink only records loot drops of **500K GP or higher**."
-            ),
-            color=discord.Color.gold(),
-            timestamp=datetime.now(timezone.utc),
-        )
-
-        if page_rows:
-            lines = []
-            for index, row in enumerate(page_rows, start=start + 1):
-                source = row["source"] or "Unknown / Other"
-                date_text = row["created_at"]
-                try:
-                    dt = datetime.fromisoformat(date_text)
-                    date_text = dt.strftime("%d/%m/%Y %H:%M")
-                except Exception:
-                    pass
-                lines.append(
-                    f"**{index}.** **{format_gp(row['value_gp'] or 0)} GP** • {source} • {date_text}"
-                )
-            embed.add_field(name="Loot drops", value="\n".join(lines), inline=False)
-        else:
-            embed.add_field(name="Loot drops", value="No loot drops found.", inline=False)
-
-        embed.set_footer(text=f"Page {self.page + 1}/{self.total_pages} • Use the 🔎 buttons to view the original drop")
-        return embed
-
-    async def _check_owner(self, interaction: discord.Interaction):
-        if interaction.user.id != self.owner_id:
-            await interaction.response.send_message(
-                "This player lookup belongs to someone else.", ephemeral=True
-            )
-            return False
-        return True
-
-    async def previous_page(self, interaction: discord.Interaction):
-        if not await self._check_owner(interaction):
-            return
-        self.page = max(0, self.page - 1)
-        self._rebuild_items()
-        await interaction.response.edit_message(embed=self.build_embed(), view=self)
-
-    async def next_page(self, interaction: discord.Interaction):
-        if not await self._check_owner(interaction):
-            return
-        self.page = min(self.total_pages - 1, self.page + 1)
-        self._rebuild_items()
-        await interaction.response.edit_message(embed=self.build_embed(), view=self)
-
-    async def close_view(self, interaction: discord.Interaction):
-        if not await self._check_owner(interaction):
-            return
-        self.stop()
-        await interaction.response.edit_message(view=None)
-
-    async def on_timeout(self):
-        self.stop()
-
-
-class PlayerStatsView(discord.ui.View):
-    """View attached to /player and /stats with a Show All loot button."""
-
-    def __init__(self, player: str, owner_id: int):
-        super().__init__(timeout=300)
-        self.player = player
-        self.owner_id = owner_id
-
-    @discord.ui.button(label="Show All", style=discord.ButtonStyle.primary, emoji="💰")
-    async def show_all(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.owner_id:
-            await interaction.response.send_message(
-                "This player lookup belongs to someone else.", ephemeral=True
-            )
-            return
-
-        rows = get_player_loot_events(self.player)
-        if not rows:
-            await interaction.response.send_message(
-                f"No loot drops found for **{self.player}**.", ephemeral=True
-            )
-            return
-
-        view = PlayerLootView(self.player, rows, self.owner_id)
-        await interaction.response.send_message(
-            embed=view.build_embed(),
-            view=view,
-            ephemeral=True,
-        )
-
-    async def on_timeout(self):
-        self.stop()
 
 def get_top_activity_per_player(limit=15):
     """Return each player's activity/source with the most accumulated loot GP."""
@@ -870,7 +679,7 @@ async def update_leaderboard():
 
         # -------------------- MOST GP BY ACTIVITY --------------------
         activity_embed = discord.Embed(
-            title="📍 MOST GP EARNED AT BOSS",
+            title="📍 MOST GP BY ACTIVITY",
             description="For each player, the activity/source where they have accumulated the most loot GP.",
             color=discord.Color.teal(),
             timestamp=datetime.now(timezone.utc),
@@ -983,9 +792,7 @@ async def send_player_stats(interaction: discord.Interaction, player: str):
     embed.add_field(name="🎁 Loot Drops", value=f"**{drops:,}**", inline=True)
     embed.add_field(name="💀 Deaths", value=f"**{deaths:,}**", inline=True)
     embed.add_field(name="💸 PvP GP Lost", value=f"**{format_gp(death_value)} GP**", inline=True)
-
-    view = PlayerStatsView(row["player"], interaction.user.id)
-    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 
