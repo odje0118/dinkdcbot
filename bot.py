@@ -14,9 +14,10 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 DROPS_CHANNEL_ID = 1540706808262430792
 DEATHS_CHANNEL_ID = 1540800494547640420
+CLOGS_CHANNEL_ID = 1540806322004566037
 LEADERBOARD_CHANNEL_ID = 1553383319696048208
 
-DB_FILE = os.getenv("DB_FILE", "leaderboard.db")
+DB_FILE = "leaderboard.db"
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -42,6 +43,7 @@ def init_db():
             player TEXT NOT NULL,
             value_gp INTEGER DEFAULT 0,
             completion_count INTEGER DEFAULT 0,
+            collection_total INTEGER DEFAULT 0,
             source TEXT DEFAULT '',
             created_at TEXT NOT NULL
         );
@@ -54,6 +56,11 @@ def init_db():
             value TEXT NOT NULL
         );
     """)
+    # Migrate databases created by earlier bot versions.
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(events)").fetchall()}
+    if "collection_total" not in columns:
+        conn.execute("ALTER TABLE events ADD COLUMN collection_total INTEGER DEFAULT 0")
+
     conn.commit()
     conn.close()
 
@@ -169,6 +176,96 @@ def parse_loot(message: discord.Message):
     }
 
 
+def parse_collection_log(message: discord.Message):
+    """Parse Dink collection-log progress from the CLOGS channel."""
+    if not message.embeds:
+        return None
+
+    embed = message.embeds[0]
+    description = embed.description or ""
+    title = embed.title or ""
+
+    player = None
+
+    # User's Dink format:
+    # "taka maka heeft Uncharged trident geclogd!"
+    if description:
+        m = re.search(r"^(.+?)\s+heeft\s+.+?\s+gec?\s*logd!", description, re.I | re.M)
+        if not m:
+            m = re.search(r"^(.+?)\s+heeft\s+.+?\s+geclogd!", description, re.I | re.M)
+        if m:
+            player = m.group(1).strip()
+
+    # Generic English fallback.
+    if not player and description:
+        for pattern in (
+            r"^(.+?)\s+logged\b",
+            r"^(.+?)\s+has logged\b",
+            r"^(.+?)\s+completed\b",
+        ):
+            m = re.search(pattern, description, re.I | re.M)
+            if m:
+                player = m.group(1).strip()
+                break
+
+    # Title is the player in many Dink configs.
+    if not player and title:
+        candidate = title.strip()
+        if candidate.lower() not in {
+            "collection log", "collection log entry", "clog", "new collection log entry"
+        }:
+            player = candidate
+
+    if not player and embed.author and embed.author.name:
+        candidate = embed.author.name.strip()
+        if candidate and "dink" not in candidate.lower():
+            player = candidate
+
+    if not player:
+        return None
+
+    completed = 0
+    total = 0
+
+    # Screenshot format: Completed = "572/1717\n(33.3%)"
+    for field in embed.fields:
+        name = (field.name or "").strip().lower()
+        value = (field.value or "").strip()
+
+        if name == "completed":
+            m = re.search(r"(\d[\d,]*)\s*/\s*(\d[\d,]*)", value)
+            if m:
+                completed = int(m.group(1).replace(",", ""))
+                total = int(m.group(2).replace(",", ""))
+            else:
+                m = re.search(r"\d[\d,]*", value)
+                if m:
+                    completed = int(m.group().replace(",", ""))
+            break
+
+    if completed <= 0:
+        # Fallback: find X/Y anywhere in the embed.
+        blob = "\n".join([title, description] + [
+            f"{field.name or ''}\n{field.value or ''}" for field in embed.fields
+        ])
+        m = re.search(r"\b(\d[\d,]*)\s*/\s*(\d[\d,]*)\b", blob)
+        if m:
+            completed = int(m.group(1).replace(",", ""))
+            total = int(m.group(2).replace(",", ""))
+
+    if completed <= 0:
+        return None
+
+    return {
+        "event_type": "clog",
+        "player": player,
+        "value_gp": 0,
+        "completion_count": completed,
+        "collection_total": total,
+        "source": "",
+    }
+
+
 def parse_death(message: discord.Message):
     if not message.embeds:
         return None
@@ -233,8 +330,8 @@ async def save_event(message: discord.Message, parsed: dict) -> bool:
             """
             INSERT OR IGNORE INTO events
             (message_id, channel_id, event_type, player, value_gp,
-             completion_count, source, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             completion_count, collection_total, source, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 message.id,
@@ -243,6 +340,7 @@ async def save_event(message: discord.Message, parsed: dict) -> bool:
                 parsed["player"],
                 parsed["value_gp"],
                 parsed["completion_count"],
+                parsed.get("collection_total", 0),
                 parsed["source"],
                 message.created_at.isoformat(),
             ),
@@ -258,6 +356,8 @@ async def process_message(message: discord.Message) -> bool:
         parsed = parse_loot(message)
     elif message.channel.id == DEATHS_CHANNEL_ID:
         parsed = parse_death(message)
+    elif message.channel.id == CLOGS_CHANNEL_ID:
+        parsed = parse_collection_log(message)
     else:
         return False
 
@@ -445,6 +545,56 @@ def get_top_activity_per_player(limit=15):
     return rows
 
 
+def get_collection_log_stats(limit=15):
+    """Get each player's highest recorded collection-log completion count."""
+    conn = db()
+    rows = conn.execute(
+        """
+        WITH ranked AS (
+            SELECT
+                LOWER(REPLACE(player, ' ', '')) AS pkey,
+                player,
+                completion_count,
+                collection_total,
+                created_at,
+                message_id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY LOWER(REPLACE(player, ' ', ''))
+                    ORDER BY completion_count DESC, datetime(created_at) DESC, message_id DESC
+                ) AS rn
+            FROM events
+            WHERE event_type='clog' AND completion_count > 0
+        )
+        SELECT player, completion_count, collection_total
+        FROM ranked
+        WHERE rn = 1
+        ORDER BY completion_count DESC, player COLLATE NOCASE
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def get_player_collection_log(player: str):
+    conn = db()
+    row = conn.execute(
+        """
+        SELECT player, completion_count, collection_total
+        FROM events
+        WHERE event_type='clog'
+          AND LOWER(REPLACE(player, ' ', '')) = LOWER(REPLACE(?, ' ', ''))
+          AND completion_count > 0
+        ORDER BY completion_count DESC, datetime(created_at) DESC, message_id DESC
+        LIMIT 1
+        """,
+        (player,),
+    ).fetchone()
+    conn.close()
+    return row
+
+
 def get_biggest_drop_per_player(limit=15):
     """Return each player's single most valuable loot event, with its Discord message ID."""
     conn = db()
@@ -581,6 +731,7 @@ async def update_leaderboard():
         rows = get_stats()
         biggest_per_player_rows = get_biggest_drop_per_player(15)
         top_activity_rows = get_top_activity_per_player(15)
+        collection_rows = get_collection_log_stats(15)
 
         # Remove the old combined leaderboard and the old global "Biggest Drops" message.
         await remove_old_combined_leaderboard(channel)
@@ -589,7 +740,7 @@ async def update_leaderboard():
         # -------------------- LOOT LEADERBOARD --------------------
         loot_embed = discord.Embed(
             title="💰 LOOT LEADERBOARD",
-            description="Total value of loot drops, ranked by GP.\n\n⚠️ Dink only records loot drops of **500K GP or higher**. Drops below 500K GP or untradeables are not included.",
+            description="Total value of Dink loot drops, ranked by GP.\n\n⚠️ Dink only records loot drops of **500K GP or higher**. Drops below 500K GP are not included.",
             color=discord.Color.green(),
             timestamp=datetime.now(timezone.utc),
         )
@@ -695,14 +846,44 @@ async def update_leaderboard():
             activity_embed.description = "\n".join(lines)
         else:
             activity_embed.description = "No loot drops have been imported yet."
-        activity_embed.set_footer(text=".")
+        activity_embed.set_footer(text="Dink • Most GP by activity")
 
-        # Update the four current leaderboard messages.
+        # -------------------- COLLECTION LOG LEADERBOARD --------------------
+        collection_embed = discord.Embed(
+            title="📚 COLLECTION LOG LEADERBOARD",
+            description="Hoogste geregistreerde Collection Log-progressie per speler.",
+            color=discord.Color.orange(),
+            timestamp=datetime.now(timezone.utc),
+        )
+
+        if collection_rows:
+            lines = []
+            medals = ["🥇", "🥈", "🥉"]
+            for i, row in enumerate(collection_rows, start=1):
+                prefix = medals[i-1] if i <= 3 else f"**{i}.**"
+                total = (
+                    f" / {row['collection_total']:,}"
+                    if row["collection_total"]
+                    else ""
+                )
+                percentage = ""
+                if row["collection_total"]:
+                    percentage = f" ({row['completion_count'] / row['collection_total'] * 100:.1f}%)"
+                lines.append(
+                    f"{prefix} **{row['player']}** — **{row['completion_count']:,}{total}**{percentage}"
+                )
+
+            add_chunked_field(collection_embed, "Completed Logs", lines)
+        else:
+            collection_embed.description = "Nog geen Collection Log-data gevonden."
+
+        # Update the five current leaderboard messages.
         leaderboard_messages = [
             ("loot_leaderboard_message_id", loot_embed),
             ("death_leaderboard_message_id", death_embed),
             ("biggest_drop_per_player_message_id", biggest_player_embed),
             ("top_activity_message_id", activity_embed),
+            ("collection_log_leaderboard_message_id", collection_embed),
         ]
 
         for setting_key, embed in leaderboard_messages:
@@ -747,7 +928,7 @@ async def on_message(message: discord.Message):
     if message.author == bot.user:
         return
 
-    if message.channel.id in (DROPS_CHANNEL_ID, DEATHS_CHANNEL_ID):
+    if message.channel.id in (DROPS_CHANNEL_ID, DEATHS_CHANNEL_ID, CLOGS_CHANNEL_ID):
         if await process_message(message):
             await update_leaderboard()
 
@@ -778,6 +959,7 @@ async def send_player_stats(interaction: discord.Interaction, player: str):
     drops = row["loot_drops"] or 0
     deaths = row["deaths"] or 0
     death_value = row["death_value_gp"] or 0
+    clog_row = get_player_collection_log(row["player"])
     completion_rows = get_player_completions(row["player"])
     completions = sum(r["completions"] or 0 for r in completion_rows)
 
@@ -791,6 +973,11 @@ async def send_player_stats(interaction: discord.Interaction, player: str):
     embed.add_field(name="🎁 Loot Drops", value=f"**{drops:,}**", inline=True)
     embed.add_field(name="💀 Deaths", value=f"**{deaths:,}**", inline=True)
     embed.add_field(name="💸 PvP GP Lost", value=f"**{format_gp(death_value)} GP**", inline=True)
+    if clog_row:
+        clog_text = f"**{clog_row['completion_count']:,}**"
+        if clog_row["collection_total"]:
+            clog_text += f" / {clog_row['collection_total']:,}"
+        embed.add_field(name="📚 Collection Log", value=clog_text, inline=True)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -874,6 +1061,7 @@ async def backfill_command(interaction: discord.Interaction):
 
     drops = await backfill_channel(DROPS_CHANNEL_ID)
     deaths = await backfill_channel(DEATHS_CHANNEL_ID)
+    clogs = await backfill_channel(CLOGS_CHANNEL_ID)
 
     try:
         await update_leaderboard()
@@ -886,6 +1074,7 @@ async def backfill_command(interaction: discord.Interaction):
         f"Backfill complete.\n"
         f"💰 Imported {drops} new loot events.\n"
         f"💀 Imported {deaths} new death events.\n"
+        f"📚 Imported {clogs} collection log events.\n"
         f"{leaderboard_status}",
         ephemeral=True,
     )
