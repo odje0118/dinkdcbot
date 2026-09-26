@@ -589,7 +589,7 @@ async def update_leaderboard():
         # -------------------- LOOT LEADERBOARD --------------------
         loot_embed = discord.Embed(
             title="💰 LOOT LEADERBOARD",
-            description="Total value of Dink loot drops, ranked by GP.\n\n⚠️ Dink only records loot drops of **500K GP or higher**. Drops below 500K GP are not included.",
+            description="Total value of loot drops, ranked by GP.\n\n⚠️ Dink only records loot drops of **500K GP or higher**. Drops below 500K GP or untradeables are not included.",
             color=discord.Color.green(),
             timestamp=datetime.now(timezone.utc),
         )
