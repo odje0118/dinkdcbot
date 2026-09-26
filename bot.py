@@ -585,89 +585,6 @@ def get_player_loot_events(player: str):
     return rows
 
 
-class ShowAllDropsView(discord.ui.View):
-    """Buttons shown under the loot leaderboard."""
-
-    def __init__(self, players):
-        super().__init__(timeout=None)
-        for player in players[:15]:
-            button = discord.ui.Button(
-                label=f"Show all drops • {player}"[:80],
-                style=discord.ButtonStyle.secondary,
-                custom_id=f"show_all_drops:{player}"[:100],
-            )
-            button.callback = self._make_callback(player)
-            self.add_item(button)
-
-    def _make_callback(self, player):
-        async def callback(interaction: discord.Interaction):
-            rows = get_player_loot_events(player)
-
-            if not rows:
-                await interaction.response.send_message(
-                    f"No recorded drops found for **{player}**.",
-                    ephemeral=True,
-                )
-                return
-
-            total = sum(row["value_gp"] or 0 for row in rows)
-            embed = discord.Embed(
-                title=f"💎 {player} — ALL DROPS",
-                description=(
-                    f"**{len(rows):,} drops** • **{format_gp(total)} GP** total\n"
-                    f"⚠️ Only Dink drops of **500K GP+** are recorded."
-                ),
-                color=discord.Color.green(),
-                timestamp=datetime.now(timezone.utc),
-            )
-
-            guild_id = interaction.guild_id
-            chunks = []
-            current = []
-
-            for row in rows:
-                item = row["loot_item"] or "Unknown item"
-                source = f" • {row['source']}" if row["source"] else ""
-                jump_url = (
-                    f"https://discord.com/channels/{guild_id}/"
-                    f"{row['channel_id']}/{row['message_id']}"
-                    if guild_id else "https://discord.com"
-                )
-                created = row["created_at"]
-                try:
-                    dt = datetime.fromisoformat(created)
-                    date_text = dt.strftime("%d-%m-%Y")
-                except Exception:
-                    date_text = ""
-
-                line = (
-                    f"💎 **{format_gp(row['value_gp'] or 0)} GP** — "
-                    f"**{item}**{source}"
-                    f" • [{date_text}]({jump_url})"
-                )
-
-                # Keep every field under Discord's 1024-character limit.
-                if sum(len(x) + 1 for x in current) + len(line) > 1000:
-                    chunks.append("\n".join(current))
-                    current = []
-                current.append(line)
-
-            if current:
-                chunks.append("\n".join(current))
-
-            for index, chunk in enumerate(chunks):
-                embed.add_field(
-                    name="Drops" if index == 0 else "Drops (continued)",
-                    value=chunk,
-                    inline=False,
-                )
-
-            embed.set_footer(text="Updated automatically")
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-
-        return callback
-
-
 def get_biggest_drop_per_player(limit=15):
     """Return each player's single most valuable loot event, with its Discord message ID."""
     conn = db()
@@ -717,7 +634,7 @@ def get_biggest_drops(limit=10):
     return rows
 
 
-async def get_or_create_leaderboard_message(channel, setting_key, embed, view=None):
+async def get_or_create_leaderboard_message(channel, setting_key, embed):
     """Fetch an existing leaderboard message or create it and remember its ID."""
     conn = db()
     setting = conn.execute(
@@ -734,10 +651,10 @@ async def get_or_create_leaderboard_message(channel, setting_key, embed, view=No
             message = None
 
     if message:
-        await message.edit(embed=embed, view=view)
+        await message.edit(embed=embed)
         return message
 
-    message = await channel.send(embed=embed, view=view)
+    message = await channel.send(embed=embed)
     conn = db()
     conn.execute(
         """
@@ -826,11 +743,14 @@ async def update_leaderboard():
             lines = []
             medals = ["🥇", "🥈", "🥉"]
             for i, row in enumerate(loot_rows[:15], start=1):
-                prefix = medals[i-1] if i <= 3 else f"**{i}.**"
+                medal = ["🥇", "🥈", "🥉"][i - 1] if i <= 3 else f"**{i}.**"
+                count = row["loot_drops"] or 0
                 lines.append(
-                    f"{prefix} **{row['player']}** — **{format_gp(row['loot_gp'] or 0)} GP**\n"
-                    f"　↳ {row['loot_drops'] or 0:,} drops"
+                    f"{medal} **{row['player']}** — **{format_gp(row['loot_gp'] or 0)} GP** "
+                    f"↳ {count} {'drop' if count == 1 else 'drops'} • "
+                    f"[Show all drops](https://discord.com/channels/{channel.guild.id}/{DROPS_CHANNEL_ID})"
                 )
+
             total_loot = sum(r["loot_gp"] or 0 for r in loot_rows)
             total_drops = sum(r["loot_drops"] or 0 for r in loot_rows)
             loot_embed.add_field(
@@ -931,13 +851,9 @@ async def update_leaderboard():
             ("top_activity_message_id", activity_embed),
         ]
 
-        loot_players = [row["player"] for row in loot_rows[:15]]
-        loot_view = ShowAllDropsView(loot_players)
-
         for setting_key, embed in leaderboard_messages:
             try:
-                view = loot_view if setting_key == "loot_leaderboard_message_id" else None
-                await get_or_create_leaderboard_message(channel, setting_key, embed, view=view)
+                await get_or_create_leaderboard_message(channel, setting_key, embed)
             except discord.HTTPException as e:
                 print(f"Could not update '{setting_key}': {e}")
 
@@ -968,22 +884,6 @@ async def on_ready():
         print(f"Logged in as {bot.user}. Synced {len(synced)} slash commands.")
     except Exception as e:
         print(f"Slash command sync failed: {e}")
-
-    # Re-register the current loot leaderboard buttons after a restart.
-    try:
-        rows = get_stats()
-        loot_players = [
-            row["player"]
-            for row in sorted(
-                [r for r in rows if (r["loot_gp"] or 0) > 0],
-                key=lambda r: (r["loot_gp"] or 0),
-                reverse=True,
-            )[:15]
-        ]
-        bot.add_view(ShowAllDropsView(loot_players))
-    except Exception as e:
-        print(f"Could not register loot leaderboard buttons: {e}")
-
     print("Bot is ready.")
 
 
