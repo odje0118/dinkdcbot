@@ -815,7 +815,7 @@ async def update_leaderboard():
                 prefix = medals[i-1] if i <= 3 else f"**{i}.**"
                 lines.append(
                     f"{prefix} **{row['player']}** — **{format_gp(row['loot_gp'] or 0)} GP**"
-                    f" • {row['source']} ({row['loot_drops'] or 0:,} drops)"
+                    f" • {row['source']} ({row['loot_drops'] or 0:,} {'drop' if (row['loot_drops'] or 0) == 1 else 'drops'})"
                 )
             activity_embed.description = "\n".join(lines)
         else:
