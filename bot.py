@@ -644,7 +644,7 @@ class ShowAllDropsSelect(discord.ui.Select):
 
             line = (
                 f"💎 **{format_gp(row['value_gp'] or 0)} GP** — "
-                f"**{item}**{source} • [{date_text}]({jump_url})"
+                f"**{item}**{source} • [Show drop]({jump_url})"
             )
 
             if sum(len(x) + 1 for x in current) + len(line) > 1000:
@@ -655,15 +655,38 @@ class ShowAllDropsSelect(discord.ui.Select):
         if current:
             chunks.append("\n".join(current))
 
-        for index, chunk in enumerate(chunks):
-            embed.add_field(
-                name="Drops" if index == 0 else "Drops (continued)",
+        # Discord allows max 25 fields per embed and also has an overall
+        # embed size limit. Split long histories into multiple embeds.
+        embeds = []
+        for page_index, chunk in enumerate(chunks):
+            page_embed = discord.Embed(
+                title=f"💎 {player} — ALL DROPS",
+                description=(
+                    f"**{len(rows):,} {'drop' if len(rows) == 1 else 'drops'}** • "
+                    f"**{format_gp(total)} GP** total\n"
+                    f"⚠️ Only Dink drops of **500K GP+** are recorded."
+                ),
+                color=discord.Color.green(),
+                timestamp=datetime.now(timezone.utc),
+            )
+            page_embed.add_field(
+                name="Drops" if page_index == 0 else "Drops (continued)",
                 value=chunk,
                 inline=False,
             )
+            page_embed.set_footer(
+                text=f"Page {page_index + 1}/{len(chunks)} • Updated automatically"
+            )
+            embeds.append(page_embed)
 
-        embed.set_footer(text="Updated automatically")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        # Discord supports up to 10 embeds in one response. If necessary,
+        # send the first 10 and then continue with follow-up messages.
+        await interaction.response.send_message(
+            embeds=embeds[:10],
+            ephemeral=True,
+        )
+        for page_embed in embeds[10:]:
+            await interaction.followup.send(embed=page_embed, ephemeral=True)
 
 
 class ShowAllDropsView(discord.ui.View):
