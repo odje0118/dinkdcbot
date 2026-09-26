@@ -851,7 +851,7 @@ async def update_leaderboard():
         # -------------------- COLLECTION LOG LEADERBOARD --------------------
         collection_embed = discord.Embed(
             title="📚 COLLECTION LOG LEADERBOARD",
-            description="Hoogste geregistreerde Collection Log-progressie per speler.",
+            description="Highest Collection Log progress per player.",
             color=discord.Color.orange(),
             timestamp=datetime.now(timezone.utc),
         )
