@@ -113,31 +113,44 @@ def get_embed_text(embed: discord.Embed) -> str:
 
 
 def parse_loot_item(embed: discord.Embed) -> str:
-    """Extract item name(s) from a Dink loot embed."""
+    """Extract item names from Dink's %LOOT% content."""
     candidates = []
+
     for field in embed.fields:
         name = (field.name or "").strip().casefold()
         value = (field.value or "").strip()
         if name in {"loot", "items", "drop", "drops", "loot items"} and value:
             candidates.append(value)
+
     if not candidates and embed.description:
         candidates.append(embed.description)
 
     for value in candidates:
-        cleaned = []
+        items = []
         for raw in value.splitlines():
-            line = raw.strip()
-            if not line or re.match(r"^(?:total value|completion count|(?:van|from)\s*:)", line, re.I):
+            line = re.sub(r"[*_`]", "", raw.strip()).strip()
+            if not line:
                 continue
-            line = re.sub(r"[*_`]", "", line).strip()
+
+            # Ignore Dink metadata and the notification sentence.
+            if re.match(r"^(?:total\s+value|completion\s+count|(?:van|from))\s*:", line, re.I):
+                continue
+            if re.search(r"\b(?:heeft een klapper geslagen|got a drop|has looted)\b", line, re.I):
+                continue
+
+            # Strip the GP value and quantity from the item line.
             line = re.sub(r"\s*[—-]\s*[\d.,]+\s*[KMB]?\s*GP\s*$", "", line, flags=re.I)
-            line = re.sub(r"\s*\(?[\d.,]+\s*[KMB]?\s*GP\)?\s*$", "", line, flags=re.I)
+            line = re.sub(r"\s+\(?[\d.,]+\s*[KMB]?\s*GP\)?\s*$", "", line, flags=re.I)
             line = re.sub(r"\s*[x×]\s*\d+\s*$", "", line, flags=re.I).strip()
+
             if line:
-                cleaned.append(line)
-        if cleaned:
-            return ", ".join(cleaned)
+                items.append(line)
+
+        if items:
+            return ", ".join(items)
+
     return ""
+
 
 
 def parse_loot(message: discord.Message):
@@ -290,23 +303,31 @@ async def save_event(message: discord.Message, parsed: dict) -> bool:
         inserted = cur.rowcount == 1
 
         # Repair drops that were imported before source parsing was fixed.
-        if (
-            not inserted
-            and parsed["event_type"] == "loot"
-            and parsed.get("source")
-        ):
-            conn.execute(
-                """
-                UPDATE events
-                SET source = ?
-                WHERE message_id = ?
-                  AND channel_id = ?
-                  AND event_type = 'loot'
-                  AND (source IS NULL OR TRIM(source) = '')
-                """,
-                (parsed["source"], message.id, message.channel.id),
-            )
-            conn.commit()
+        if not inserted and parsed["event_type"] == "loot":
+            updates = []
+            params = []
+
+            if parsed.get("source"):
+                updates.append("source = ?")
+                params.append(parsed["source"])
+
+            if parsed.get("loot_item"):
+                updates.append("loot_item = ?")
+                params.append(parsed["loot_item"])
+
+            if updates:
+                params.extend([message.id, message.channel.id])
+                conn.execute(
+                    f"""
+                    UPDATE events
+                    SET {", ".join(updates)}
+                    WHERE message_id = ?
+                      AND channel_id = ?
+                      AND event_type = 'loot'
+                    """,
+                    params,
+                )
+                conn.commit()
 
         conn.close()
     return inserted
