@@ -695,7 +695,7 @@ async def update_leaderboard():
             activity_embed.description = "\n".join(lines)
         else:
             activity_embed.description = "No loot drops have been imported yet."
-        activity_embed.set_footer(text="Dink • Most GP by activity")
+        activity_embed.set_footer(text=".")
 
         # Update the four current leaderboard messages.
         leaderboard_messages = [
