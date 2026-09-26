@@ -760,12 +760,9 @@ async def update_leaderboard():
             medals = ["🥇", "🥈", "🥉"]
             for i, row in enumerate(death_rows[:15], start=1):
                 prefix = medals[i-1] if i <= 3 else f"**{i}.**"
-                deaths = row["deaths"] or 0
                 lost = row["death_value_gp"] or 0
-                loss_text = f" ↳ 💸 **{format_gp(lost)} GP** PvP loss" if lost else ""
-                lines.append(
-                    f"{prefix} **{row['player']}** — **{deaths:,}** deaths{loss_text}"
-                )
+                suffix = f"\n　↳ 💸 {format_gp(lost)} GP PvP loss" if lost else ""
+                lines.append(f"{prefix} **{row['player']}** — **{row['deaths']:,} deaths**{suffix}")
             add_chunked_field(death_embed, "Most Deaths", lines)
             total_deaths = sum(r["deaths"] or 0 for r in death_rows)
             total_loss = sum(r["death_value_gp"] or 0 for r in death_rows)
@@ -825,7 +822,7 @@ async def update_leaderboard():
         else:
             activity_embed.description = "No loot drops have been imported yet."
         for _embed in (loot_embed, death_embed, biggest_player_embed, activity_embed):
-            _embed.set_footer(text="Updated automatically")
+            _embed.set_footer(text="Dink Loot Tracker • Updated automatically")
 
         # Update the four current leaderboard messages.
         leaderboard_messages = [
