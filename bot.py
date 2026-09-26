@@ -14,10 +14,9 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 DROPS_CHANNEL_ID = 1540706808262430792
 DEATHS_CHANNEL_ID = 1540800494547640420
-CLOGS_CHANNEL_ID = 1540806322004566037
 LEADERBOARD_CHANNEL_ID = 1553383319696048208
 
-DB_FILE = "leaderboard.db"
+DB_FILE = os.getenv("DB_FILE", "leaderboard.db")
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -43,7 +42,6 @@ def init_db():
             player TEXT NOT NULL,
             value_gp INTEGER DEFAULT 0,
             completion_count INTEGER DEFAULT 0,
-            collection_total INTEGER DEFAULT 0,
             source TEXT DEFAULT '',
             created_at TEXT NOT NULL
         );
@@ -56,10 +54,6 @@ def init_db():
             value TEXT NOT NULL
         );
     """)
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(events)").fetchall()}
-    if "collection_total" not in columns:
-        conn.execute("ALTER TABLE events ADD COLUMN collection_total INTEGER DEFAULT 0")
-
     conn.commit()
     conn.close()
 
@@ -175,78 +169,6 @@ def parse_loot(message: discord.Message):
     }
 
 
-def parse_collection_log(message: discord.Message):
-    """Parse a Dink Collection Log message from the dedicated CLOGS channel."""
-    if not message.embeds:
-        return None
-
-    embed = message.embeds[0]
-    title = (embed.title or "").strip()
-    description = embed.description or ""
-
-    # In the user's Dink embed format, the embed title is the RSN.
-    # Prefer it so names like "Gim_rody" are never turned into "Gim_rody has".
-    player = None
-    if title and title.lower() not in {
-        "collection log",
-        "collection log entry",
-        "clog",
-        "new collection log entry",
-    }:
-        if not re.search(r"\bcollection\s+log\b", title, re.I):
-            player = title
-
-    # Fallback to the Dutch/English description only when no usable title exists.
-    if not player and description:
-        for pattern in (
-            r"^(.+?)\s+heeft\s+.+?\s+geclogd!",
-            r"^(.+?)\s+has\s+added\b",
-            r"^(.+?)\s+added\b",
-            r"^(.+?)\s+has\s+received\b",
-            r"^(.+?)\s+received\b",
-        ):
-            m = re.search(pattern, description, re.I | re.M)
-            if m:
-                player = m.group(1).strip()
-                break
-
-    if not player and embed.author and embed.author.name:
-        candidate = embed.author.name.strip()
-        if candidate and "dink" not in candidate.lower():
-            player = candidate
-
-    if not player:
-        return None
-
-    completed = 0
-    total = 0
-
-    # The "Completed" field in the user's screenshot is the authoritative source.
-    for field in embed.fields:
-        name = (field.name or "").strip().lower()
-        value = (field.value or "").strip()
-
-        if name == "completed":
-            m = re.search(r"(\d[\d,]*)\s*/\s*(\d[\d,]*)", value)
-            if m:
-                completed = int(m.group(1).replace(",", ""))
-                total = int(m.group(2).replace(",", ""))
-            break
-
-    if completed <= 0:
-        return None
-
-    return {
-        "event_type": "clog",
-        "player": player.strip(),
-        "value_gp": 0,
-        "completion_count": completed,
-        "collection_total": total,
-        "source": "",
-    }
-
-
-
 def parse_death(message: discord.Message):
     if not message.embeds:
         return None
@@ -311,8 +233,8 @@ async def save_event(message: discord.Message, parsed: dict) -> bool:
             """
             INSERT OR IGNORE INTO events
             (message_id, channel_id, event_type, player, value_gp,
-             completion_count, collection_total, source, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             completion_count, source, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 message.id,
@@ -321,7 +243,6 @@ async def save_event(message: discord.Message, parsed: dict) -> bool:
                 parsed["player"],
                 parsed["value_gp"],
                 parsed["completion_count"],
-                parsed.get("collection_total", 0),
                 parsed["source"],
                 message.created_at.isoformat(),
             ),
@@ -337,8 +258,6 @@ async def process_message(message: discord.Message) -> bool:
         parsed = parse_loot(message)
     elif message.channel.id == DEATHS_CHANNEL_ID:
         parsed = parse_death(message)
-    elif message.channel.id == CLOGS_CHANNEL_ID:
-        parsed = parse_collection_log(message)
     else:
         return False
 
@@ -526,56 +445,6 @@ def get_top_activity_per_player(limit=15):
     return rows
 
 
-def get_collection_log_stats(limit=15):
-    """Get each player's highest recorded collection-log completion count."""
-    conn = db()
-    rows = conn.execute(
-        """
-        WITH ranked AS (
-            SELECT
-                LOWER(REPLACE(player, ' ', '')) AS pkey,
-                player,
-                completion_count,
-                collection_total,
-                created_at,
-                message_id,
-                ROW_NUMBER() OVER (
-                    PARTITION BY LOWER(REPLACE(player, ' ', ''))
-                    ORDER BY completion_count DESC, datetime(created_at) DESC, message_id DESC
-                ) AS rn
-            FROM events
-            WHERE event_type='clog' AND completion_count > 0
-        )
-        SELECT player, completion_count, collection_total
-        FROM ranked
-        WHERE rn = 1
-        ORDER BY completion_count DESC, player COLLATE NOCASE
-        LIMIT ?
-        """,
-        (limit,),
-    ).fetchall()
-    conn.close()
-    return rows
-
-
-def get_player_collection_log(player: str):
-    conn = db()
-    row = conn.execute(
-        """
-        SELECT player, completion_count, collection_total
-        FROM events
-        WHERE event_type='clog'
-          AND LOWER(REPLACE(player, ' ', '')) = LOWER(REPLACE(?, ' ', ''))
-          AND completion_count > 0
-        ORDER BY completion_count DESC, datetime(created_at) DESC, message_id DESC
-        LIMIT 1
-        """,
-        (player,),
-    ).fetchone()
-    conn.close()
-    return row
-
-
 def get_biggest_drop_per_player(limit=15):
     """Return each player's single most valuable loot event, with its Discord message ID."""
     conn = db()
@@ -626,22 +495,6 @@ def get_biggest_drops(limit=10):
 
 async def get_or_create_leaderboard_message(channel, setting_key, embed):
     """Fetch an existing leaderboard message or create it and remember its ID."""
-    # Guard against Discord's embed limits before making the API request.
-    if len(embed.title or "") > 256:
-        embed.title = (embed.title or "")[:256]
-    if len(embed.description or "") > 4096:
-        embed.description = (embed.description or "")[:4093] + "..."
-    total = len(embed.title or "") + len(embed.description or "")
-    for field in embed.fields:
-        if len(field.name or "") > 256:
-            field.name = (field.name or "")[:256]
-        if len(field.value or "") > 1024:
-            field.value = (field.value or "")[:1021] + "..."
-    if len(embed.fields) > 25:
-        embed.clear_fields()
-        embed.description = (embed.description or "")[:3500] + "\n\nSome leaderboard data was trimmed to fit Discord's embed limits."
-        total = len(embed.title or "") + len(embed.description or "")
-
     conn = db()
     setting = conn.execute(
         "SELECT value FROM settings WHERE key=?",
@@ -723,27 +576,20 @@ async def update_leaderboard():
                 channel = await bot.fetch_channel(LEADERBOARD_CHANNEL_ID)
             except Exception as e:
                 print(f"Could not access leaderboard channel: {e}")
-                return False, [f"Cannot access leaderboard channel: {e}"]
+                return
 
         rows = get_stats()
         biggest_per_player_rows = get_biggest_drop_per_player(15)
         top_activity_rows = get_top_activity_per_player(15)
-        collection_rows = get_collection_log_stats(15)
 
-        # Remove only the obsolete global Biggest Drops message.
-        try:
-            await delete_leaderboard_message(channel, "biggest_drops_message_id")
-        except Exception as e:
-            print(f"Could not remove old Biggest Drops message: {e}")
+        # Remove the old combined leaderboard and the old global "Biggest Drops" message.
+        await remove_old_combined_leaderboard(channel)
+        await delete_leaderboard_message(channel, "biggest_drops_message_id")
 
         # -------------------- LOOT LEADERBOARD --------------------
         loot_embed = discord.Embed(
             title="💰 LOOT LEADERBOARD",
-            description=(
-                "Total value of Dink loot drops, ranked by GP.\n\n"
-                "⚠️ Dink only records loot drops of **500K GP or higher**. "
-                "Drops below 500K GP are not included."
-            ),
+            description="Total value of loot drops, ranked by GP.\n\n⚠️ Dink only records loot drops of **500K GP or higher**. Untradeables or drops below 500K GP are not included.",
             color=discord.Color.green(),
             timestamp=datetime.now(timezone.utc),
         )
@@ -770,7 +616,7 @@ async def update_leaderboard():
                 inline=False,
             )
         else:
-            loot_embed.description += "\n\nNo loot drops have been imported yet."
+            loot_embed.description = "No loot drops have been imported yet."
 
         # -------------------- DEATH LEADERBOARD --------------------
         death_embed = discord.Embed(
@@ -801,13 +647,12 @@ async def update_leaderboard():
                 inline=False,
             )
         else:
-            death_embed.description += "\n\nNo deaths have been imported yet."
+            death_embed.description = "No deaths have been imported yet."
 
         # -------------------- BIGGEST DROP PER PLAYER --------------------
         biggest_player_embed = discord.Embed(
             title="💎 BIGGEST DROP PER PLAYER",
-            description="Each player's single most valuable Dink loot drop.\n\n"
-                        "⚠️ Dink only records loot drops of **500K GP or higher**.",
+            description="Each player's single most valuable Dink loot drop.\n\n⚠️ Dink only records loot drops of **500K GP or higher**.",
             color=discord.Color.purple(),
             timestamp=datetime.now(timezone.utc),
         )
@@ -819,17 +664,17 @@ async def update_leaderboard():
                 prefix = medals[i-1] if i <= 3 else f"**{i}.**"
                 source = f" • {row['source']}" if row["source"] else ""
                 jump_url = (
-                    f"https://discord.com/channels/{guild_id}/{row['channel_id']}/{row['message_id']}"
+                    f"https://discord.com/channels/{guild_id}/"
+                    f"{row['channel_id']}/{row['message_id']}"
                     if guild_id else "https://discord.com"
                 )
                 lines.append(
-                    f"{prefix} **{row['player']}** — **{format_gp(row['value_gp'])} GP**"
-                    f"{source} • [View drop]({jump_url})"
+                    f"{prefix} **{row['player']}** — **{format_gp(row['value_gp'])} GP**{source} • [View drop]({jump_url})"
                 )
-            # Put the list in the description. 15 entries comfortably fit under 4096.
-            biggest_player_embed.description += "\n\n" + "\n".join(lines)
+            # One list in the embed description — no (2/3), (3/3) field labels.
+            biggest_player_embed.description = "\n".join(lines)
         else:
-            biggest_player_embed.description += "\n\nNo loot drops have been imported yet."
+            biggest_player_embed.description = "No loot drops have been imported yet."
 
         # -------------------- MOST GP BY ACTIVITY --------------------
         activity_embed = discord.Embed(
@@ -847,89 +692,24 @@ async def update_leaderboard():
                     f"{prefix} **{row['player']}** — **{format_gp(row['loot_gp'] or 0)} GP**"
                     f" • {row['source']} ({row['loot_drops'] or 0:,} drops)"
                 )
-            activity_embed.description += "\n\n" + "\n".join(lines)
+            activity_embed.description = "\n".join(lines)
         else:
-            activity_embed.description += "\n\nNo loot drops have been imported yet."
+            activity_embed.description = "No loot drops have been imported yet."
+        activity_embed.set_footer(text="")
 
-        # -------------------- COLLECTION LOG LEADERBOARD --------------------
-        collection_embed = discord.Embed(
-            title="📚 COLLECTION LOG LEADERBOARD",
-            description="Hoogste geregistreerde Collection Log-progressie per speler.",
-            color=discord.Color.orange(),
-            timestamp=datetime.now(timezone.utc),
-        )
-        if collection_rows:
-            lines = []
-            medals = ["🥇", "🥈", "🥉"]
-            for i, row in enumerate(collection_rows, start=1):
-                prefix = medals[i-1] if i <= 3 else f"**{i}.**"
-                progress = f"{row['completion_count']:,}"
-                if row["collection_total"]:
-                    progress += f" / {row['collection_total']:,}"
-                    pct = row["completion_count"] / row["collection_total"] * 100
-                    progress += f" ({pct:.1f}%)"
-                lines.append(f"{prefix} **{row['player']}** — **{progress}**")
-            add_chunked_field(collection_embed, "Completed Logs", lines)
-        else:
-            collection_embed.description = "Nog geen Collection Log-data gevonden."
-
+        # Update the four current leaderboard messages.
         leaderboard_messages = [
             ("loot_leaderboard_message_id", loot_embed),
             ("death_leaderboard_message_id", death_embed),
             ("biggest_drop_per_player_message_id", biggest_player_embed),
             ("top_activity_message_id", activity_embed),
-            ("collection_log_leaderboard_message_id", collection_embed),
         ]
 
-        errors = []
-        success = 0
         for setting_key, embed in leaderboard_messages:
             try:
                 await get_or_create_leaderboard_message(channel, setting_key, embed)
-                success += 1
             except discord.HTTPException as e:
-                errors.append(f"{setting_key}: HTTP {e.status} {e.code} {e.text}")
                 print(f"Could not update '{setting_key}': {e}")
-            except Exception as e:
-                errors.append(f"{setting_key}: {type(e).__name__}: {e}")
-                print(f"Could not update '{setting_key}': {type(e).__name__}: {e}")
-
-        return success == len(leaderboard_messages), errors
-
-
-async def rebuild_collection_logs():
-    """Delete existing CLOG records and rebuild them from the CLOGS channel."""
-    async with db_lock:
-        conn = db()
-        deleted = conn.execute("DELETE FROM events WHERE event_type='clog'").rowcount
-        conn.commit()
-        conn.close()
-
-    imported = 0
-    channel = bot.get_channel(CLOGS_CHANNEL_ID)
-    if channel is None:
-        channel = await bot.fetch_channel(CLOGS_CHANNEL_ID)
-
-    async for message in channel.history(limit=None, oldest_first=True):
-        parsed = parse_collection_log(message)
-        if parsed and await save_event(message, parsed):
-            imported += 1
-
-    await update_leaderboard()
-    return deleted, imported
-
-
-async def backfill_channel(channel_id: int):
-    channel = bot.get_channel(channel_id)
-    if channel is None:
-        channel = await bot.fetch_channel(channel_id)
-
-    imported = 0
-    async for message in channel.history(limit=None, oldest_first=True):
-        if await process_message(message):
-            imported += 1
-
-    return imported
 
 
 async def backfill_channel(channel_id: int):
@@ -967,7 +747,7 @@ async def on_message(message: discord.Message):
     if message.author == bot.user:
         return
 
-    if message.channel.id in (DROPS_CHANNEL_ID, DEATHS_CHANNEL_ID, CLOGS_CHANNEL_ID):
+    if message.channel.id in (DROPS_CHANNEL_ID, DEATHS_CHANNEL_ID):
         if await process_message(message):
             await update_leaderboard()
 
@@ -977,18 +757,11 @@ async def on_message(message: discord.Message):
 @bot.tree.command(name="leaderboard", description="Show the current clan leaderboard.")
 async def leaderboard_command(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    success, errors = await update_leaderboard()
-    if success:
-        await interaction.followup.send(
-            f"✅ Leaderboard updated in <#{LEADERBOARD_CHANNEL_ID}>.",
-            ephemeral=True,
-        )
-    else:
-        details = "\n".join(f"• {e}" for e in errors)
-        await interaction.followup.send(
-            f"⚠️ Leaderboard update was incomplete.\n{details}",
-            ephemeral=True,
-        )
+    await update_leaderboard()
+    await interaction.followup.send(
+        f"Leaderboard updated in <#{LEADERBOARD_CHANNEL_ID}>.",
+        ephemeral=True,
+    )
 
 
 async def send_player_stats(interaction: discord.Interaction, player: str):
@@ -1094,67 +867,26 @@ async def player_command(interaction: discord.Interaction, player: str):
     await send_player_stats(interaction, player)
 
 
-@bot.tree.command(name="rebuildclogs", description="Rebuild the Collection Log leaderboard from the CLOGS channel.")
-@app_commands.checks.has_permissions(manage_guild=True)
-async def rebuildclogs_command(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-
-    try:
-        deleted, imported = await rebuild_collection_logs()
-        await interaction.followup.send(
-            f"Collection Log rebuild complete.\n"
-            f"🗑️ Removed {deleted:,} old Collection Log records.\n"
-            f"📚 Imported {imported:,} Collection Log messages.\n"
-            f"✅ Leaderboard updated.",
-            ephemeral=True,
-        )
-    except Exception as e:
-        print(f"Collection Log rebuild error: {type(e).__name__}: {e}")
-        await interaction.followup.send(
-            f"❌ Collection Log rebuild failed: {type(e).__name__}: {e}",
-            ephemeral=True,
-        )
-
-
-@rebuildclogs_command.error
-async def rebuildclogs_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    msg = "You need **Manage Server** permission to use this command."
-    if isinstance(error, app_commands.errors.MissingPermissions):
-        if interaction.response.is_done():
-            await interaction.followup.send(msg, ephemeral=True)
-        else:
-            await interaction.response.send_message(msg, ephemeral=True)
-    else:
-        print(f"Collection Log rebuild command error: {type(error).__name__}: {error}")
-
-
-@bot.tree.command(name="backfill", description="Import existing Dink messages from DROPS, DEATHS and CLOGS.")
+@bot.tree.command(name="backfill", description="Import existing Dink messages from DROPS and DEATHS.")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def backfill_command(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
 
     drops = await backfill_channel(DROPS_CHANNEL_ID)
     deaths = await backfill_channel(DEATHS_CHANNEL_ID)
-    clogs = await backfill_channel(CLOGS_CHANNEL_ID)
 
-    success, errors = await update_leaderboard()
-
-    status = (
-        "✅ All leaderboard messages updated."
-        if success
-        else "⚠️ Some leaderboard messages could not be updated."
-    )
-
-    error_text = ""
-    if errors:
-        error_text = "\n\n**Leaderboard errors:**\n" + "\n".join(f"• {e}" for e in errors)
+    try:
+        await update_leaderboard()
+        leaderboard_status = "✅ Leaderboards updated."
+    except Exception as e:
+        leaderboard_status = f"⚠️ Leaderboard update error: {type(e).__name__}: {e}"
+        print(f"Backfill leaderboard update error: {type(e).__name__}: {e}")
 
     await interaction.followup.send(
         f"Backfill complete.\n"
         f"💰 Imported {drops} new loot events.\n"
         f"💀 Imported {deaths} new death events.\n"
-        f"📚 Imported {clogs} new collection log events.\n"
-        f"{status}{error_text}",
+        f"{leaderboard_status}",
         ephemeral=True,
     )
 
