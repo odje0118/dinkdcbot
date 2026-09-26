@@ -1,0 +1,18 @@
+DINK DISCORD LEADERBOARD BOT - RAILWAY SETUP
+
+1. Create a Railway project and deploy this folder/repository.
+2. Set the Railway service Start Command to:
+   python bot.py
+3. Add this environment variable:
+   DISCORD_TOKEN = YOUR_DISCORD_BOT_TOKEN
+4. Add a Railway Volume and mount it at:
+   /data
+5. Add this environment variable so the SQLite database is persistent:
+   DB_FILE = /data/leaderboard.db
+6. Deploy/redeploy.
+7. Once the bot is online, run /backfill in Discord.
+
+You do NOT need to upload .env to Railway.
+Keep your Discord token secret.
+
+The bot's Discord channel IDs are already configured in bot.py.
