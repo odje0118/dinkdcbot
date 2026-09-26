@@ -155,11 +155,16 @@ def parse_loot(message: discord.Message):
         elif name == "total value":
             total_value = parse_gp(value)
 
-    if embed.description:
-        # Dink can use either the Dutch or English source label.
-        source_match = re.search(r"(?:Van|From):\s*(.+)", embed.description, re.I)
-        if source_match:
-            source = source_match.group(1).strip()
+    # Dink has used both "Van:" and "From:" over time. Search the
+    # complete embed text because the label may be outside the description.
+    source_text = get_embed_text(embed)
+    source_match = re.search(
+        r"(?:^|[\r\n])\s*(?:Van|From)\s*:\s*([^\r\n]+)",
+        source_text,
+        re.I,
+    )
+    if source_match:
+        source = source_match.group(1).strip()
 
     return {
         "event_type": "loot",
@@ -248,8 +253,27 @@ async def save_event(message: discord.Message, parsed: dict) -> bool:
                 message.created_at.isoformat(),
             ),
         )
-        conn.commit()
         inserted = cur.rowcount == 1
+
+        # Repair drops that were imported before source parsing was fixed.
+        if (
+            not inserted
+            and parsed["event_type"] == "loot"
+            and parsed.get("source")
+        ):
+            conn.execute(
+                """
+                UPDATE events
+                SET source = ?
+                WHERE message_id = ?
+                  AND channel_id = ?
+                  AND event_type = 'loot'
+                  AND (source IS NULL OR TRIM(source) = '')
+                """,
+                (parsed["source"], message.id, message.channel.id),
+            )
+            conn.commit()
+
         conn.close()
     return inserted
 
