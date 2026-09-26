@@ -568,23 +568,6 @@ def get_top_activity_per_player(limit=15):
     return rows
 
 
-def get_player_loot_events(player: str):
-    """Return all recorded loot drops for a player, newest first."""
-    conn = db()
-    rows = conn.execute(
-        """
-        SELECT player, value_gp, loot_item, source, created_at, message_id, channel_id
-        FROM events
-        WHERE event_type='loot'
-          AND LOWER(REPLACE(player, ' ', '')) = LOWER(REPLACE(?, ' ', ''))
-        ORDER BY created_at DESC, message_id DESC
-        """,
-        (player,),
-    ).fetchall()
-    conn.close()
-    return rows
-
-
 def get_biggest_drop_per_player(limit=15):
     """Return each player's single most valuable loot event, with its Discord message ID."""
     conn = db()
@@ -743,14 +726,11 @@ async def update_leaderboard():
             lines = []
             medals = ["🥇", "🥈", "🥉"]
             for i, row in enumerate(loot_rows[:15], start=1):
-                medal = ["🥇", "🥈", "🥉"][i - 1] if i <= 3 else f"**{i}.**"
-                count = row["loot_drops"] or 0
+                prefix = medals[i-1] if i <= 3 else f"**{i}.**"
                 lines.append(
-                    f"{medal} **{row['player']}** — **{format_gp(row['loot_gp'] or 0)} GP** "
-                    f"↳ {count} {'drop' if count == 1 else 'drops'} • "
-                    f"[Show all drops](https://discord.com/channels/{channel.guild.id}/{DROPS_CHANNEL_ID})"
+                    f"{prefix} **{row['player']}** — **{format_gp(row['loot_gp'] or 0)} GP**\n"
+                    f"　↳ {row['loot_drops'] or 0:,} drops"
                 )
-
             total_loot = sum(r["loot_gp"] or 0 for r in loot_rows)
             total_drops = sum(r["loot_drops"] or 0 for r in loot_rows)
             loot_embed.add_field(
@@ -841,7 +821,7 @@ async def update_leaderboard():
         else:
             activity_embed.description = "No loot drops have been imported yet."
         for _embed in (loot_embed, death_embed, biggest_player_embed, activity_embed):
-            _embed.set_footer(text="Updated automatically")
+            _embed.set_footer(text="Dink Loot Tracker • Updated automatically")
 
         # Update the four current leaderboard messages.
         leaderboard_messages = [
@@ -884,6 +864,7 @@ async def on_ready():
         print(f"Logged in as {bot.user}. Synced {len(synced)} slash commands.")
     except Exception as e:
         print(f"Slash command sync failed: {e}")
+
     print("Bot is ready.")
 
 
