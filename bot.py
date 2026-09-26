@@ -713,7 +713,7 @@ async def update_leaderboard():
         # -------------------- LOOT LEADERBOARD --------------------
         loot_embed = discord.Embed(
             title="💰 LOOT LEADERBOARD",
-            description="Total value of loot drops, ranked by GP.\n\n⚠️ Dink only records loot drops of **500K GP or higher**. Untradeables or drops below 500K GP are not included.",
+            description="━━━━━━━━━━━━━━━━━━━━\n**TOTAL LOOT RANKING**\n━━━━━━━━━━━━━━━━━━━━\nHighest recorded loot value per player.\n\n⚠️ Only Dink drops of **500K GP+** are recorded.",
             color=discord.Color.green(),
             timestamp=datetime.now(timezone.utc),
         )
@@ -731,21 +731,21 @@ async def update_leaderboard():
                     f"{prefix} **{row['player']}** — **{format_gp(row['loot_gp'] or 0)} GP**\n"
                     f"　↳ {row['loot_drops'] or 0:,} drops"
                 )
-            add_chunked_field(loot_embed, "Top Looters", lines)
             total_loot = sum(r["loot_gp"] or 0 for r in loot_rows)
             total_drops = sum(r["loot_drops"] or 0 for r in loot_rows)
             loot_embed.add_field(
-                name="📊 Clan Totals",
-                value=f"💰 **{format_gp(total_loot)} GP** total loot\n🎁 **{total_drops:,}** loot drops",
+                name="📊 CLAN TOTALS",
+                value=f"💰 **{format_gp(total_loot)} GP** total loot   •   🎁 **{total_drops:,}** drops",
                 inline=False,
             )
+            add_chunked_field(loot_embed, "🏆 TOP LOOTERS", lines)
         else:
             loot_embed.description = "No loot drops have been imported yet."
 
         # -------------------- DEATH LEADERBOARD --------------------
         death_embed = discord.Embed(
             title="💀 DEATH LEADERBOARD",
-            description="Player deaths reported by Dink, ranked by death count.",
+            description="━━━━━━━━━━━━━━━━━━━━\n**MOST DEATHS**\n━━━━━━━━━━━━━━━━━━━━\nPlayer deaths reported by Dink, ranked by death count.",
             color=discord.Color.red(),
             timestamp=datetime.now(timezone.utc),
         )
@@ -766,8 +766,8 @@ async def update_leaderboard():
             total_deaths = sum(r["deaths"] or 0 for r in death_rows)
             total_loss = sum(r["death_value_gp"] or 0 for r in death_rows)
             death_embed.add_field(
-                name="📊 Clan Totals",
-                value=f"💀 **{total_deaths:,}** deaths\n💸 **{format_gp(total_loss)} GP** lost in PvP",
+                name="📊 CLAN TOTALS",
+                value=f"💀 **{total_deaths:,}** deaths   •   💸 **{format_gp(total_loss)} GP** lost in PvP",
                 inline=False,
             )
         else:
@@ -776,7 +776,7 @@ async def update_leaderboard():
         # -------------------- BIGGEST DROP PER PLAYER --------------------
         biggest_player_embed = discord.Embed(
             title="💎 BIGGEST DROP PER PLAYER",
-            description="Each player's single most valuable Dink loot drop.\n\n⚠️ Dink only records loot drops of **500K GP or higher**.",
+            description="━━━━━━━━━━━━━━━━━━━━\n**PERSONAL RECORD DROPS**\n━━━━━━━━━━━━━━━━━━━━\nEach player's single most valuable recorded drop.\n\n⚠️ Only Dink drops of **500K GP+** are recorded.",
             color=discord.Color.purple(),
             timestamp=datetime.now(timezone.utc),
         )
@@ -804,7 +804,7 @@ async def update_leaderboard():
         # -------------------- MOST GP BY ACTIVITY --------------------
         activity_embed = discord.Embed(
             title="📍 MOST GP EARNED AT",
-            description="For each player, where they have accumulated the most loot GP.",
+            description="━━━━━━━━━━━━━━━━━━━━\n**TOP ACTIVITY PER PLAYER**\n━━━━━━━━━━━━━━━━━━━━\nThe activity where each player has earned the most recorded GP.",
             color=discord.Color.teal(),
             timestamp=datetime.now(timezone.utc),
         )
@@ -820,7 +820,8 @@ async def update_leaderboard():
             activity_embed.description = "\n".join(lines)
         else:
             activity_embed.description = "No loot drops have been imported yet."
-        activity_embed.set_footer(text="")
+        for _embed in (loot_embed, death_embed, biggest_player_embed, activity_embed):
+            _embed.set_footer(text="Dink Loot Tracker • Updated automatically")
 
         # Update the four current leaderboard messages.
         leaderboard_messages = [
