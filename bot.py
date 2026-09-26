@@ -727,9 +727,10 @@ async def update_leaderboard():
             medals = ["🥇", "🥈", "🥉"]
             for i, row in enumerate(loot_rows[:15], start=1):
                 prefix = medals[i-1] if i <= 3 else f"**{i}.**"
+                count = row["loot_drops"] or 0
                 lines.append(
-                    f"{prefix} **{row['player']}** — **{format_gp(row['loot_gp'] or 0)} GP**\n"
-                    f"　↳ {row['loot_drops'] or 0:,} drops"
+                    f"{prefix} **{row['player']}** — **{format_gp(row['loot_gp'] or 0)} GP** "
+                    f"↳ **{count:,} {'drop' if count == 1 else 'drops'}**"
                 )
             total_loot = sum(r["loot_gp"] or 0 for r in loot_rows)
             total_drops = sum(r["loot_drops"] or 0 for r in loot_rows)
