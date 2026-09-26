@@ -822,7 +822,7 @@ async def update_leaderboard():
         else:
             activity_embed.description = "No loot drops have been imported yet."
         for _embed in (loot_embed, death_embed, biggest_player_embed, activity_embed):
-            _embed.set_footer(text="Dink Loot Tracker • Updated automatically")
+            _embed.set_footer(text="Updated automatically")
 
         # Update the four current leaderboard messages.
         leaderboard_messages = [
