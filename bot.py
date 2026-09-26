@@ -568,6 +568,110 @@ def get_top_activity_per_player(limit=15):
     return rows
 
 
+
+def get_player_loot_events(player: str):
+    conn = db()
+    rows = conn.execute(
+        """
+        SELECT player, value_gp, loot_item, source, created_at, message_id, channel_id
+        FROM events
+        WHERE event_type='loot'
+          AND LOWER(REPLACE(player, ' ', '')) = LOWER(REPLACE(?, ' ', ''))
+        ORDER BY created_at DESC, message_id DESC
+        """,
+        (player,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+class ShowAllDropsSelect(discord.ui.Select):
+    def __init__(self, players):
+        options = [
+            discord.SelectOption(
+                label=player[:100],
+                value=player[:100],
+                description="View all recorded drops"[:100],
+            )
+            for player in players[:25]
+        ]
+        super().__init__(
+            placeholder="Choose a player...",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        player = self.values[0]
+        rows = get_player_loot_events(player)
+
+        if not rows:
+            await interaction.response.send_message(
+                f"No recorded drops found for **{player}**.",
+                ephemeral=True,
+            )
+            return
+
+        total = sum(row["value_gp"] or 0 for row in rows)
+        embed = discord.Embed(
+            title=f"💎 {player} — ALL DROPS",
+            description=(
+                f"**{len(rows):,} {'drop' if len(rows) == 1 else 'drops'}** • "
+                f"**{format_gp(total)} GP** total\n"
+                f"⚠️ Only Dink drops of **500K GP+** are recorded."
+            ),
+            color=discord.Color.green(),
+            timestamp=datetime.now(timezone.utc),
+        )
+
+        guild_id = interaction.guild_id
+        chunks = []
+        current = []
+
+        for row in rows:
+            item = row["loot_item"] or "Unknown item"
+            source = f" • {row['source']}" if row["source"] else ""
+            jump_url = (
+                f"https://discord.com/channels/{guild_id}/"
+                f"{row['channel_id']}/{row['message_id']}"
+            )
+            try:
+                dt = datetime.fromisoformat(row["created_at"])
+                date_text = dt.strftime("%d-%m-%Y")
+            except Exception:
+                date_text = ""
+
+            line = (
+                f"💎 **{format_gp(row['value_gp'] or 0)} GP** — "
+                f"**{item}**{source} • [{date_text}]({jump_url})"
+            )
+
+            if sum(len(x) + 1 for x in current) + len(line) > 1000:
+                chunks.append("\n".join(current))
+                current = []
+            current.append(line)
+
+        if current:
+            chunks.append("\n".join(current))
+
+        for index, chunk in enumerate(chunks):
+            embed.add_field(
+                name="Drops" if index == 0 else "Drops (continued)",
+                value=chunk,
+                inline=False,
+            )
+
+        embed.set_footer(text="Updated automatically")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+class ShowAllDropsView(discord.ui.View):
+    def __init__(self, players):
+        super().__init__(timeout=None)
+        self.add_item(ShowAllDropsSelect(players))
+
+
 def get_biggest_drop_per_player(limit=15):
     """Return each player's single most valuable loot event, with its Discord message ID."""
     conn = db()
@@ -617,7 +721,7 @@ def get_biggest_drops(limit=10):
     return rows
 
 
-async def get_or_create_leaderboard_message(channel, setting_key, embed):
+async def get_or_create_leaderboard_message(channel, setting_key, embed, view=None):
     """Fetch an existing leaderboard message or create it and remember its ID."""
     conn = db()
     setting = conn.execute(
@@ -634,10 +738,10 @@ async def get_or_create_leaderboard_message(channel, setting_key, embed):
             message = None
 
     if message:
-        await message.edit(embed=embed)
+        await message.edit(embed=embed, view=view)
         return message
 
-    message = await channel.send(embed=embed)
+    message = await channel.send(embed=embed, view=view)
     conn = db()
     conn.execute(
         """
@@ -832,9 +936,13 @@ async def update_leaderboard():
             ("top_activity_message_id", activity_embed),
         ]
 
+        loot_players = [row["player"] for row in loot_rows[:25]]
+        loot_view = ShowAllDropsView(loot_players)
+
         for setting_key, embed in leaderboard_messages:
             try:
-                await get_or_create_leaderboard_message(channel, setting_key, embed)
+                view = loot_view if setting_key == "loot_leaderboard_message_id" else None
+                await get_or_create_leaderboard_message(channel, setting_key, embed, view=view)
             except discord.HTTPException as e:
                 print(f"Could not update '{setting_key}': {e}")
 
@@ -865,6 +973,20 @@ async def on_ready():
         print(f"Logged in as {bot.user}. Synced {len(synced)} slash commands.")
     except Exception as e:
         print(f"Slash command sync failed: {e}")
+
+    try:
+        stats = get_stats()
+        loot_players = [
+            row["player"]
+            for row in sorted(
+                [r for r in stats if (r["loot_gp"] or 0) > 0],
+                key=lambda r: (r["loot_gp"] or 0),
+                reverse=True,
+            )[:25]
+        ]
+        bot.add_view(ShowAllDropsView(loot_players))
+    except Exception as e:
+        print(f"Could not register loot player dropdown: {e}")
 
     print("Bot is ready.")
 
