@@ -2,7 +2,7 @@ import os
 import re
 import sqlite3
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import discord
 from discord import app_commands
@@ -508,14 +508,13 @@ def add_chunked_field(embed: discord.Embed, field_name: str, lines):
 
 
 def weekly_reset_countdown():
-    """Return a human-readable countdown to the next Monday 00:00."""
+    """Return a countdown to the next Monday 00:00 in the bot's local time."""
     now = datetime.now()
     days_until_monday = (7 - now.weekday()) % 7
     next_monday = (now + timedelta(days=days_until_monday)).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
 
-    # If it is already Monday after midnight, target the following Monday.
     if next_monday <= now:
         next_monday += timedelta(days=7)
 
@@ -1159,7 +1158,7 @@ async def update_leaderboard():
             total_drops = sum(r["loot_drops"] or 0 for r in loot_rows)
 
             loot_embed.add_field(
-                name="📊 CLAN TOTALS",
+                name="📊 GROUP TOTALS",
                 value=(
                     f"💰 **{format_gp(total_loot)} GP** total loot   •   "
                     f"🎁 **{total_drops:,}** drops"
@@ -1252,7 +1251,7 @@ async def update_leaderboard():
             total_deaths = sum(r["deaths"] or 0 for r in death_rows)
             total_loss = sum(r["death_value_gp"] or 0 for r in death_rows)
             death_embed.add_field(
-                name="📊 CLAN TOTALS",
+                name="📊 GROUP TOTALS",
                 value=(
                     f"💀 **{total_deaths:,}** deaths   •   "
                     f"💸 **{format_gp(total_loss)} GP** lost in PvP"
