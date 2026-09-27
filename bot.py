@@ -636,6 +636,45 @@ def get_player_loot_events(player: str):
     return rows
 
 
+class PlayerDropsPaginationView(discord.ui.View):
+    def __init__(self, embeds):
+        super().__init__(timeout=300)
+        self.embeds = embeds
+        self.current_page = 0
+        self.previous_button = discord.ui.Button(label="Previous", style=discord.ButtonStyle.secondary, emoji="◀️")
+        self.next_button = discord.ui.Button(label="Next", style=discord.ButtonStyle.secondary, emoji="▶️")
+        self.page_button = discord.ui.Button(label=f"Page 1/{len(embeds)}", style=discord.ButtonStyle.primary, disabled=True)
+
+        self.previous_button.callback = self.previous_page
+        self.next_button.callback = self.next_page
+        self.add_item(self.previous_button)
+        self.add_item(self.page_button)
+        self.add_item(self.next_button)
+        self.update_buttons()
+
+    def update_buttons(self):
+        self.previous_button.disabled = self.current_page == 0
+        self.next_button.disabled = self.current_page >= len(self.embeds) - 1
+        self.page_button.label = f"Page {self.current_page + 1}/{len(self.embeds)}"
+
+    async def previous_page(self, interaction: discord.Interaction):
+        if self.current_page > 0:
+            self.current_page -= 1
+        self.update_buttons()
+        await interaction.response.edit_message(embed=self.embeds[self.current_page], view=self)
+
+    async def next_page(self, interaction: discord.Interaction):
+        if self.current_page < len(self.embeds) - 1:
+            self.current_page += 1
+        self.update_buttons()
+        await interaction.response.edit_message(embed=self.embeds[self.current_page], view=self)
+
+    async def on_timeout(self):
+        self.previous_button.disabled = True
+        self.next_button.disabled = True
+        self.page_button.disabled = True
+
+
 class ShowAllDropsSelect(discord.ui.Select):
     def __init__(self, players):
         options = [
@@ -651,6 +690,7 @@ class ShowAllDropsSelect(discord.ui.Select):
             min_values=1,
             max_values=1,
             options=options,
+            custom_id="leaderboard_show_all_drops",
         )
 
     async def callback(self, interaction: discord.Interaction):
@@ -665,17 +705,6 @@ class ShowAllDropsSelect(discord.ui.Select):
             return
 
         total = sum(row["value_gp"] or 0 for row in rows)
-        embed = discord.Embed(
-            title=f"💎 {player} — ALL DROPS",
-            description=(
-                f"**{len(rows):,} {'drop' if len(rows) == 1 else 'drops'}** • "
-                f"**{format_gp(total)} GP** total\n"
-                f"⚠️ Only Dink drops of **500K GP+** are recorded."
-            ),
-            color=discord.Color.green(),
-            timestamp=datetime.now(timezone.utc),
-        )
-
         guild_id = interaction.guild_id
         chunks = []
         current = []
@@ -693,10 +722,6 @@ class ShowAllDropsSelect(discord.ui.Select):
                 f"**{item}**{source} • [Show drop]({jump_url})"
             )
 
-            # Markdown links contain the full Discord message URL, which is
-            # counted toward Discord's embed character limit. Use the full
-            # embed description (up to ~5,000 chars) instead of a 1,024-char
-            # field so we can fit many more drops per message.
             candidate = line if not current else "\n".join(current + [line])
             if current and len(candidate) > 3800:
                 chunks.append("\n".join(current))
@@ -725,14 +750,14 @@ class ShowAllDropsSelect(discord.ui.Select):
             )
             embeds.append(page_embed)
 
-        # Send the first page as the interaction response, then use
-        # follow-ups for the remaining pages.
+        # Keep all pages in one ephemeral message and navigate between them
+        # with Previous/Next buttons instead of sending multiple messages.
+        view = PlayerDropsPaginationView(embeds)
         await interaction.response.send_message(
             embed=embeds[0],
+            view=view,
             ephemeral=True,
         )
-        for page_embed in embeds[1:]:
-            await interaction.followup.send(embed=page_embed, ephemeral=True)
 
 
 class ShowAllDropsView(discord.ui.View):
