@@ -1254,7 +1254,7 @@ async def update_leaderboard():
                 "━━━━━━━━━━━━━━━━━━━━\n"
                 "**WEEKLY LOOT RANKING**\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
-                "Highest recorded loot value per player this week.\n"
+                "Combined loot value per member this week.\n"
                 f"⏱️ **Resets in: {weekly_reset_countdown()}**\n\n"
             )
 
