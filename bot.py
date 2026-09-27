@@ -1911,7 +1911,11 @@ def build_weekly_winner_announcement(
     )
 
     if drops:
-        description += "💰 **DROPS THIS WEEK**\n"
+        total_won = sum(int(row["value_gp"] or 0) for row in drops)
+        description += (
+            f"💰 **TOTAL THIS WEEK: {format_gp(total_won)} GP**\n\n"
+            f"**DROPS THIS WEEK**\n"
+        )
         drop_lines = []
 
         for row in drops[:15]:
