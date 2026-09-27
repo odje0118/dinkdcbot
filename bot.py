@@ -82,6 +82,11 @@ def init_db():
             old_key TEXT PRIMARY KEY,
             current_name TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS player_aliases (
+            old_key TEXT PRIMARY KEY,
+            current_name TEXT NOT NULL
+        );
     """)
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(events)").fetchall()}
     if "loot_item" not in columns:
@@ -378,12 +383,46 @@ def parse_death(message: discord.Message):
     }
 
 
+def resolve_player_alias(name: str) -> str:
+    """Resolve an OSRS username through the stored name-change aliases."""
+    current = display_player_name(name)
+    if not current:
+        return current
+
+    conn = db()
+    try:
+        seen = set()
+        for _ in range(20):
+            key = player_key(current)
+            if not key or key in seen:
+                break
+            seen.add(key)
+
+            row = conn.execute(
+                "SELECT current_name FROM player_aliases WHERE old_key = ?",
+                (key,),
+            ).fetchone()
+            if not row:
+                break
+
+            next_name = display_player_name(row["current_name"])
+            if not next_name or player_key(next_name) == key:
+                break
+            current = next_name
+        return current
+    finally:
+        conn.close()
+
+
 async def save_event(message: discord.Message, parsed: dict) -> bool:
     """Insert a Dink event or repair an existing event."""
     # Dink will continue reporting the new/old OSRS name independently of
     # the leaderboard profile. Resolve aliases before storing the event.
     parsed = dict(parsed)
     parsed["player"] = resolve_player_name(parsed["player"])
+
+    parsed = dict(parsed)
+    parsed["player"] = resolve_player_alias(parsed["player"])
 
     async with db_lock:
         conn = db()
@@ -1321,7 +1360,22 @@ async def on_ready():
     init_db()
     try:
         synced = await bot.tree.sync()
-        print(f"Logged in as {bot.user}. Synced {len(synced)} slash commands.")
+        print(f"Logged in as {bot.user}. Synced {len(synced)} global slash commands.")
+
+        # Also sync to the guild containing the Dink drops channel so newly
+        # added commands such as /namechange appear immediately, rather than
+        # waiting for Discord's global command propagation.
+        drops_channel = bot.get_channel(DROPS_CHANNEL_ID)
+        if drops_channel is None:
+            drops_channel = await bot.fetch_channel(DROPS_CHANNEL_ID)
+
+        guild = getattr(drops_channel, "guild", None)
+        if guild is not None:
+            guild_synced = await bot.tree.sync(guild=guild)
+            print(
+                f"Synced {len(guild_synced)} guild slash commands "
+                f"to {guild.name} ({guild.id})."
+            )
     except Exception as e:
         print(f"Slash command sync failed: {e}")
 
@@ -1539,14 +1593,12 @@ async def namechange_error(
     interaction: discord.Interaction,
     error: app_commands.AppCommandError,
 ):
-    if isinstance(error, app_commands.errors.MissingPermissions):
-        msg = "You need **Manage Server** permission to use this command."
-        if interaction.response.is_done():
-            await interaction.followup.send(msg, ephemeral=True)
-        else:
-            await interaction.response.send_message(msg, ephemeral=True)
-    else:
-        print(f"Name change command error: {error}")
+    print(f"Name change command error: {error}")
+    if not interaction.response.is_done():
+        await interaction.response.send_message(
+            f"❌ Name change failed: {error}",
+            ephemeral=True,
+        )
 
 
 @bot.tree.command(name="refreshnames", description="Refresh displayed player names from the latest stored Dink event.")
