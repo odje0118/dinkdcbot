@@ -15,6 +15,7 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 DROPS_CHANNEL_ID = 1540706808262430792
 DEATHS_CHANNEL_ID = 1540800494547640420
 LEADERBOARD_CHANNEL_ID = 1553383319696048208
+WEEKLY_LOOT_ANNOUNCEMENT_CHANNEL_ID = 1553886530823524424
 WEEKLY_LOOT_WINNER_ROLE_NAME = "Weekly Loot Winner"
 
 DB_FILE = os.getenv("DB_FILE", "leaderboard.db")
@@ -1870,6 +1871,48 @@ async def weekly_loot_role_rotation():
                 conn.commit()
             finally:
                 conn.close()
+            # Announce the completed week's winner only after the role was
+            # successfully granted.
+            try:
+                announcement_channel = bot.get_channel(
+                    WEEKLY_LOOT_ANNOUNCEMENT_CHANNEL_ID
+                )
+                if announcement_channel is None:
+                    announcement_channel = await bot.fetch_channel(
+                        WEEKLY_LOOT_ANNOUNCEMENT_CHANNEL_ID
+                    )
+
+                discord_id = get_linked_discord_id(winner)
+                mention = f"<@{int(discord_id)}>" if discord_id is not None else f"**{winner}**"
+
+                announcement = discord.Embed(
+                    title="🏆 WEEKLY LOOT WINNER",
+                    description=(
+                        f"Congratulations {mention}!\n\n"
+                        f"You finished **#1** in the weekly loot ranking "
+                        f"for the completed week starting **{completed_week}**.\n\n"
+                        f"🎖️ The **{WEEKLY_LOOT_WINNER_ROLE_NAME}** role "
+                        f"has been granted to you!"
+                    ),
+                    color=discord.Color.gold(),
+                    timestamp=datetime.now(timezone.utc),
+                )
+                announcement.set_footer(
+                    text="The new weekly loot ranking has now started."
+                )
+                await announcement_channel.send(embed=announcement)
+                print(
+                    f"Weekly Loot Winner announcement sent to channel "
+                    f"{WEEKLY_LOOT_ANNOUNCEMENT_CHANNEL_ID}."
+                )
+            except Exception as exc:
+                print(
+                    f"Weekly Loot Winner announcement failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+            # Mark the completed week as processed even if the announcement
+            # channel temporarily fails, so the winner is not re-awarded.
             set_last_awarded_week(completed_week)
     except Exception as exc:
         print(f"Weekly Loot Winner rotation error: {type(exc).__name__}: {exc}")
@@ -1944,6 +1987,90 @@ async def on_message_edit(before: discord.Message, after: discord.Message):
     if after.channel.id in (DROPS_CHANNEL_ID, DEATHS_CHANNEL_ID):
         if await process_message(after):
             await update_leaderboard()
+
+
+@bot.tree.command(
+    name="roletest",
+    description="Test the Weekly Loot Winner role and announcement."
+)
+@app_commands.describe(player="OSRS player to test")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def roletest_command(interaction: discord.Interaction, player: str):
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.followup.send(
+                "This command can only be used inside the server.",
+                ephemeral=True,
+            )
+            return
+
+        discord_id = get_linked_discord_id(player)
+        if discord_id is None:
+            await interaction.followup.send(
+                f"**{player}** has no linked Discord ID. Use `/showids` to link one first.",
+                ephemeral=True,
+            )
+            return
+
+        # Use the same real role-assignment function as the weekly rotation.
+        success, result = await grant_weekly_loot_role(player, guild)
+        if not success:
+            await interaction.followup.send(
+                f"❌ Role test failed: {result}",
+                ephemeral=True,
+            )
+            return
+
+        announcement_channel = bot.get_channel(
+            WEEKLY_LOOT_ANNOUNCEMENT_CHANNEL_ID
+        )
+        if announcement_channel is None:
+            announcement_channel = await bot.fetch_channel(
+                WEEKLY_LOOT_ANNOUNCEMENT_CHANNEL_ID
+            )
+
+        mention = f"<@{int(discord_id)}>"
+
+        embed = discord.Embed(
+            title="🧪 WEEKLY LOOT WINNER — TEST",
+            description=(
+                f"Congratulations {mention}!\n\n"
+                f"This is a **test** of the Weekly Loot Winner system.\n\n"
+                f"🎖️ The **{WEEKLY_LOOT_WINNER_ROLE_NAME}** role has been "
+                f"successfully granted to you!"
+            ),
+            color=discord.Color.gold(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.set_footer(text="This was triggered by /roletest.")
+
+        await announcement_channel.send(
+            content=mention,
+            embed=embed,
+        )
+
+        await interaction.followup.send(
+            f"✅ Test successful. {mention} was given the "
+            f"**{WEEKLY_LOOT_WINNER_ROLE_NAME}** role and the test announcement "
+            f"was sent to <#{WEEKLY_LOOT_ANNOUNCEMENT_CHANNEL_ID}>.",
+            ephemeral=True,
+        )
+
+    except Exception as exc:
+        print(f"/roletest error: {type(exc).__name__}: {exc}")
+        if interaction.response.is_done():
+            await interaction.followup.send(
+                f"❌ Role test failed: `{type(exc).__name__}: {exc}`",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                f"❌ Role test failed: `{type(exc).__name__}: {exc}`",
+                ephemeral=True,
+            )
 
 
 @bot.tree.command(name="debugplayer", description="Debug stored Dink events for a player.")
