@@ -720,7 +720,13 @@ class PlayerDropsPages(discord.ui.View):
             if not await self._check_owner(interaction):
                 return
             self.stop()
-            await interaction.response.edit_message(view=None)
+            await interaction.response.defer()
+            try:
+                await interaction.delete_original_response()
+            except (discord.NotFound, discord.HTTPException):
+                # If Discord has already removed the ephemeral response,
+                # there is nothing left to delete.
+                pass
 
         previous.callback = previous_callback
         next_button.callback = next_callback
