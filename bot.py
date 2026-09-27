@@ -1828,18 +1828,93 @@ def get_completed_weekly_loot_winner(week_monday):
         conn.close()
 
 
-def build_weekly_winner_announcement(winner, discord_id, completed_week, role):
+def get_completed_weekly_winner_drops(winner, completed_week, discord_id=None):
+    """Return the loot drops that contributed to the completed weekly win.
+
+    If the winner has a linked Discord ID, include drops from all OSRS accounts
+    linked to that Discord ID, matching the weekly leaderboard's grouping.
+    Otherwise only include the winner's OSRS profile.
+    """
+    conn = db()
+    try:
+        if discord_id is not None:
+            rows = conn.execute(
+                """
+                SELECT e.player, e.value_gp, e.loot_item, e.source, e.created_at
+                FROM events e
+                JOIN player_discord_links pdl
+                  ON pdl.player_key = LOWER(REPLACE(e.player, ' ', ''))
+                WHERE e.event_type='loot'
+                  AND pdl.discord_id = ?
+                  AND datetime(e.created_at) >= datetime(?, '00:00:00')
+                  AND datetime(e.created_at) < datetime(?, '+7 days', '00:00:00')
+                ORDER BY datetime(e.created_at) ASC, e.message_id ASC
+                """,
+                (int(discord_id), completed_week, completed_week),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT player, value_gp, loot_item, source, created_at
+                FROM events
+                WHERE event_type='loot'
+                  AND LOWER(REPLACE(player, ' ', '')) =
+                      LOWER(REPLACE(?, ' ', ''))
+                  AND datetime(created_at) >= datetime(?, '00:00:00')
+                  AND datetime(created_at) < datetime(?, '+7 days', '00:00:00')
+                ORDER BY datetime(created_at) ASC, message_id ASC
+                """,
+                (winner, completed_week, completed_week),
+            ).fetchall()
+        return rows
+    finally:
+        conn.close()
+
+
+def build_weekly_winner_announcement(
+    winner, discord_id, completed_week, role, drops=None
+):
     mention = f"<@{int(discord_id)}>" if discord_id is not None else f"**{winner}**"
     role_mention = role.mention
 
+    description = (
+        f"Congratulations {mention}!\n\n"
+        f"You finished **#1** in the weekly loot ranking "
+        f"for the completed week starting **{completed_week}**.\n\n"
+    )
+
+    if drops:
+        description += "💰 **DROPS WON THIS WEEK**\n"
+        drop_lines = []
+
+        for row in drops[:15]:
+            item = row["loot_item"] or row["source"] or "Loot drop"
+            value = format_gp(int(row["value_gp"] or 0))
+            player_name = row["player"]
+
+            # Show the OSRS account only when multiple linked accounts
+            # contributed, so the winner can see where each drop came from.
+            if discord_id is not None:
+                drop_lines.append(
+                    f"• **{item}** — **{value} GP** ({player_name})"
+                )
+            else:
+                drop_lines.append(f"• **{item}** — **{value} GP**")
+
+        description += "\n".join(drop_lines)
+
+        if len(drops) > 15:
+            description += (
+                f"\n• *...and {len(drops) - 15} more drops*"
+            )
+
+        description += "\n\n"
+
+    description += f"🎖️ The {role_mention} role has been granted to you!"
+
     return discord.Embed(
         title="🏆 WEEKLY LOOT WINNER",
-        description=(
-            f"Congratulations {mention}!\n\n"
-            f"You finished **#1** in the weekly loot ranking "
-            f"for the completed week starting **{completed_week}**.\n\n"
-            f"🎖️ The {role_mention} role has been granted to you!"
-        ),
+        description=description,
         color=discord.Color.gold(),
         timestamp=datetime.now(timezone.utc),
     )
@@ -1907,11 +1982,18 @@ async def weekly_loot_role_rotation():
                         f'Role "{WEEKLY_LOOT_WINNER_ROLE_NAME}" was not found in the server.'
                     )
 
+                winner_drops = get_completed_weekly_winner_drops(
+                    winner,
+                    completed_week,
+                    discord_id,
+                )
+
                 announcement = build_weekly_winner_announcement(
                     winner,
                     discord_id,
                     completed_week,
                     winner_role,
+                    winner_drops,
                 )
                 announcement.set_footer(
                     text="The new weekly loot ranking has now started."
@@ -2058,11 +2140,18 @@ async def roletest_command(interaction: discord.Interaction, player: str):
             return
 
         # Use the exact same announcement embed as the real weekly rotation.
+        completed_week = get_previous_completed_week_key()
+        winner_drops = get_completed_weekly_winner_drops(
+            player,
+            completed_week,
+            discord_id,
+        )
         embed = build_weekly_winner_announcement(
             player,
             discord_id,
-            get_previous_completed_week_key(),
+            completed_week,
             winner_role,
+            winner_drops,
         )
         embed.set_footer(text="The new weekly loot ranking has now started.")
 
