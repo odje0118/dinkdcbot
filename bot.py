@@ -1745,12 +1745,25 @@ WEEKLY_WINNER_LAST_AWARDED_KEY = "weekly_winner_last_awarded_week"
 
 
 def get_previous_completed_week_key():
-    """Return the Monday date for the most recently completed Monday-Sunday week."""
+    """Return the Monday date for the most recently completed Monday-Sunday week.
+
+    On Monday, the week that just ended is the Monday immediately before today.
+    On every other day, the most recently completed week is the Monday before
+    the current week.
+    """
     now = datetime.now()
     this_monday = now - timedelta(days=now.weekday())
     this_monday = this_monday.replace(hour=0, minute=0, second=0, microsecond=0)
-    previous_monday = this_monday - timedelta(days=7)
-    return previous_monday.strftime("%Y-%m-%d")
+
+    # At the start of Monday, the previous Monday-Sunday period has just ended.
+    # During the rest of the week, that Monday-Sunday period is still active,
+    # so the most recently completed period is the one before it.
+    if now.weekday() == 0:
+        completed_monday = this_monday
+    else:
+        completed_monday = this_monday - timedelta(days=7)
+
+    return completed_monday.strftime("%Y-%m-%d")
 
 
 def get_last_awarded_week():
@@ -1872,19 +1885,33 @@ def get_completed_weekly_winner_drops(winner, completed_week, discord_id=None):
 
 
 def build_weekly_winner_announcement(
-    winner, discord_id, completed_week, role, drops=None
+    winner, discord_id, completed_week, role, drops=None, guild_id=None
 ):
     mention = f"<@{int(discord_id)}>" if discord_id is not None else f"**{winner}**"
     role_mention = role.mention
 
+    # Dutch date formatting without changing the bot's timezone behaviour.
+    week_start = datetime.strptime(completed_week, "%Y-%m-%d")
+    week_end = week_start + timedelta(days=6)
+    dutch_months = {
+        1: "januari", 2: "februari", 3: "maart", 4: "april",
+        5: "mei", 6: "juni", 7: "juli", 8: "augustus",
+        9: "september", 10: "oktober", 11: "november", 12: "december",
+    }
+    week_range = (
+        f"{week_start.day} {dutch_months[week_start.month]} {week_start.year}"
+        f" t/m "
+        f"{week_end.day} {dutch_months[week_end.month]} {week_end.year}"
+    )
+
     description = (
         f"Congratulations {mention}!\n\n"
         f"You finished **#1** in the weekly loot ranking "
-        f"for the completed week starting **{completed_week}**.\n\n"
+        f"for the completed week **{week_range}**.\n\n"
     )
 
     if drops:
-        description += "💰 **DROPS WON THIS WEEK**\n"
+        description += "💰 **DROPS THIS WEEK**\n"
         drop_lines = []
 
         for row in drops[:15]:
@@ -1892,21 +1919,28 @@ def build_weekly_winner_announcement(
             value = format_gp(int(row["value_gp"] or 0))
             player_name = row["player"]
 
-            # Show the OSRS account only when multiple linked accounts
-            # contributed, so the winner can see where each drop came from.
+            if guild_id:
+                drop_url = (
+                    f"https://discord.com/channels/"
+                    f"{guild_id}/{row['channel_id']}/{row['message_id']}"
+                )
+                show_drop = f"[Show Drop]({drop_url})"
+            else:
+                show_drop = "Show Drop"
+
             if discord_id is not None:
                 drop_lines.append(
-                    f"• **{item}** — **{value} GP** ({player_name})"
+                    f"• **{item}** — **{value} GP** ({player_name}) • {show_drop}"
                 )
             else:
-                drop_lines.append(f"• **{item}** — **{value} GP**")
+                drop_lines.append(
+                    f"• **{item}** — **{value} GP** • {show_drop}"
+                )
 
         description += "\n".join(drop_lines)
 
         if len(drops) > 15:
-            description += (
-                f"\n• *...and {len(drops) - 15} more drops*"
-            )
+            description += f"\n• *...and {len(drops) - 15} more drops*"
 
         description += "\n\n"
 
@@ -1994,6 +2028,7 @@ async def weekly_loot_role_rotation():
                     completed_week,
                     winner_role,
                     winner_drops,
+                    guild.id,
                 )
                 announcement.set_footer(
                     text="The new weekly loot ranking has now started."
@@ -2152,6 +2187,7 @@ async def roletest_command(interaction: discord.Interaction, player: str):
             completed_week,
             winner_role,
             winner_drops,
+            guild.id,
         )
         embed.set_footer(text="The new weekly loot ranking has now started.")
 
