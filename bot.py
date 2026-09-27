@@ -647,10 +647,14 @@ class ShowAllDropsSelect(discord.ui.Select):
                 f"**{item}**{source} • [Show drop]({jump_url})"
             )
 
-            if sum(len(x) + 1 for x in current) + len(line) > 1000:
+            # Pack as many drops as possible into one field while staying
+            # safely below Discord's 1024-character field limit.
+            candidate = line if not current else "\n".join(current + [line])
+            if current and len(candidate) > 1000:
                 chunks.append("\n".join(current))
-                current = []
-            current.append(line)
+                current = [line]
+            else:
+                current.append(line)
 
         if current:
             chunks.append("\n".join(current))
