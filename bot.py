@@ -1829,6 +1829,23 @@ def get_completed_weekly_loot_winner(week_monday):
 
 
 @tasks.loop(hours=1)
+def build_weekly_winner_announcement(winner, discord_id, completed_week):
+    mention = f"<@{int(discord_id)}>" if discord_id is not None else f"**{winner}**"
+    role_mention = f"<@&{WEEKLY_LOOT_WINNER_ROLE_ID}>"
+
+    return discord.Embed(
+        title="🏆 WEEKLY LOOT WINNER",
+        description=(
+            f"Congratulations {mention}!\\n\\n"
+            f"You finished **#1** in the weekly loot ranking "
+            f"for the completed week starting **{completed_week}**.\\n\\n"
+            f"🎖️ The {role_mention} role has been granted to you!"
+        ),
+        color=discord.Color.gold(),
+        timestamp=datetime.now(timezone.utc),
+    )
+
+
 async def weekly_loot_role_rotation():
     try:
         # Only the winner of the most recently COMPLETED week receives
@@ -1885,22 +1902,18 @@ async def weekly_loot_role_rotation():
                 discord_id = get_linked_discord_id(winner)
                 mention = f"<@{int(discord_id)}>" if discord_id is not None else f"**{winner}**"
 
-                announcement = discord.Embed(
-                    title="🏆 WEEKLY LOOT WINNER",
-                    description=(
-                        f"Congratulations {mention}!\n\n"
-                        f"You finished **#1** in the weekly loot ranking "
-                        f"for the completed week starting **{completed_week}**.\n\n"
-                        f"🎖️ The **{WEEKLY_LOOT_WINNER_ROLE_NAME}** role "
-                        f"has been granted to you!"
-                    ),
-                    color=discord.Color.gold(),
-                    timestamp=datetime.now(timezone.utc),
+                announcement = build_weekly_winner_announcement(
+                    winner,
+                    discord_id,
+                    completed_week,
                 )
                 announcement.set_footer(
                     text="The new weekly loot ranking has now started."
                 )
-                await announcement_channel.send(embed=announcement)
+                await announcement_channel.send(
+                    content=f"<@{int(discord_id)}> <@&{WEEKLY_LOOT_WINNER_ROLE_ID}>",
+                    embed=announcement,
+                )
                 print(
                     f"Weekly Loot Winner announcement sent to channel "
                     f"{WEEKLY_LOOT_ANNOUNCEMENT_CHANNEL_ID}."
@@ -2034,21 +2047,16 @@ async def roletest_command(interaction: discord.Interaction, player: str):
 
         mention = f"<@{int(discord_id)}>"
 
-        embed = discord.Embed(
-            title="🧪 WEEKLY LOOT WINNER — TEST",
-            description=(
-                f"Congratulations {mention}!\n\n"
-                f"This is a **test** of the Weekly Loot Winner system.\n\n"
-                f"🎖️ The **{WEEKLY_LOOT_WINNER_ROLE_NAME}** role has been "
-                f"successfully granted to you!"
-            ),
-            color=discord.Color.gold(),
-            timestamp=datetime.now(timezone.utc),
+        # Use the exact same announcement embed as the real weekly rotation.
+        embed = build_weekly_winner_announcement(
+            player,
+            discord_id,
+            get_previous_completed_week_key(),
         )
-        embed.set_footer(text="This was triggered by /roletest.")
+        embed.set_footer(text="The new weekly loot ranking has now started.")
 
         await announcement_channel.send(
-            content=mention,
+            content=f"<@{int(discord_id)}> <@&{WEEKLY_LOOT_WINNER_ROLE_ID}>",
             embed=embed,
         )
 
