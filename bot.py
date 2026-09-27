@@ -77,6 +77,11 @@ def init_db():
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS player_aliases (
+            old_key TEXT PRIMARY KEY,
+            current_name TEXT NOT NULL
+        );
     """)
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(events)").fetchall()}
     if "loot_item" not in columns:
@@ -122,6 +127,35 @@ def player_key(name: str) -> str:
 def display_player_name(name: str) -> str:
     """Preserve the exact spacing used by Dink in its notification."""
     return (name or "").strip()
+
+
+def resolve_player_name(name: str) -> str:
+    """Return the current canonical player name for a Dink username."""
+    name = display_player_name(name)
+    if not name:
+        return name
+
+    conn = db()
+    current = name
+    seen = set()
+
+    # Follow aliases so chained name changes keep working.
+    while True:
+        key = player_key(current)
+        if not key or key in seen:
+            break
+        seen.add(key)
+
+        row = conn.execute(
+            "SELECT current_name FROM player_aliases WHERE old_key = ?",
+            (key,),
+        ).fetchone()
+        if not row:
+            break
+        current = row["current_name"]
+
+    conn.close()
+    return display_player_name(current)
 
 
 def get_embed_text(embed: discord.Embed) -> str:
@@ -346,6 +380,11 @@ def parse_death(message: discord.Message):
 
 async def save_event(message: discord.Message, parsed: dict) -> bool:
     """Insert a Dink event or repair an existing event."""
+    # Dink will continue reporting the new/old OSRS name independently of
+    # the leaderboard profile. Resolve aliases before storing the event.
+    parsed = dict(parsed)
+    parsed["player"] = resolve_player_name(parsed["player"])
+
     async with db_lock:
         conn = db()
         cur = conn.execute(
@@ -1393,6 +1432,121 @@ async def send_player_stats(interaction: discord.Interaction, player: str):
     embed.add_field(name="💸 PvP GP Lost", value=f"**{format_gp(death_value)} GP**", inline=True)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+
+
+@bot.tree.command(name="namechange", description="Merge an old OSRS username into a new username.")
+@app_commands.describe(
+    old_name="The player's previous OSRS username",
+    new_name="The player's new OSRS username",
+)
+async def namechange_command(
+    interaction: discord.Interaction,
+    old_name: str,
+    new_name: str,
+):
+    old_name = display_player_name(old_name)
+    new_name = display_player_name(new_name)
+
+    if not old_name or not new_name:
+        await interaction.response.send_message(
+            "Both the old and new username are required.",
+            ephemeral=True,
+        )
+        return
+
+    old_key = player_key(old_name)
+    new_key = player_key(new_name)
+
+    if old_key == new_key:
+        await interaction.response.send_message(
+            "The old and new username are the same.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    async with db_lock:
+        conn = db()
+        try:
+            # Preserve the user's chosen current spelling.
+            # Any existing aliases that pointed at the old profile are moved
+            # to the new profile as well, so chains remain intact.
+            conn.execute(
+                """
+                UPDATE player_aliases
+                SET current_name = ?
+                WHERE old_key = ?
+                """,
+                (new_name, old_key),
+            )
+
+            # If the old name was itself an alias, make that alias point to
+            # the new canonical name. Otherwise create it.
+            conn.execute(
+                """
+                INSERT INTO player_aliases(old_key, current_name)
+                VALUES(?, ?)
+                ON CONFLICT(old_key) DO UPDATE SET current_name=excluded.current_name
+                """,
+                (old_key, new_name),
+            )
+
+            # Merge every historical event under the old name into the new
+            # profile. This also merges cleanly if the new name already has
+            # existing loot/death events.
+            cur = conn.execute(
+                """
+                UPDATE events
+                SET player = ?
+                WHERE LOWER(REPLACE(player, ' ', '')) = ?
+                """,
+                (new_name, old_key),
+            )
+            merged_events = cur.rowcount
+
+            # Any aliases which ultimately pointed to the old profile should
+            # now resolve directly to the new profile.
+            conn.execute(
+                """
+                UPDATE player_aliases
+                SET current_name = ?
+                WHERE LOWER(REPLACE(current_name, ' ', '')) = ?
+                  AND old_key <> ?
+                """,
+                (new_name, old_key, new_key),
+            )
+
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    await update_leaderboard()
+    await interaction.followup.send(
+        f"✅ Name change applied: **{old_name}** → **{new_name}**\n"
+        f"📦 Merged **{merged_events:,}** historical event(s) into **{new_name}**.\n"
+        f"🔗 Future drops and deaths reported under **{old_name}** will now be "
+        f"added to **{new_name}**.",
+        ephemeral=True,
+    )
+
+
+@namechange_command.error
+async def namechange_error(
+    interaction: discord.Interaction,
+    error: app_commands.AppCommandError,
+):
+    if isinstance(error, app_commands.errors.MissingPermissions):
+        msg = "You need **Manage Server** permission to use this command."
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    else:
+        print(f"Name change command error: {error}")
 
 
 @bot.tree.command(name="refreshnames", description="Refresh displayed player names from the latest stored Dink event.")
