@@ -24,6 +24,7 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 db_lock = asyncio.Lock()
 update_lock = asyncio.Lock()
+leaderboard_view = None
 
 
 def db():
@@ -669,10 +670,148 @@ class ShowAllDropsSelect(discord.ui.Select):
             await interaction.followup.send(embed=page_embed, ephemeral=True)
 
 
-class ShowAllDropsView(discord.ui.View):
-    def __init__(self, players):
+class LeaderboardCategoryButton(discord.ui.Button):
+    def __init__(self, category, label, emoji):
+        super().__init__(
+            label=label,
+            emoji=emoji,
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"leaderboard_category_{category}",
+            row=0,
+        )
+        self.category = category
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if view is None:
+            await interaction.response.send_message(
+                "Leaderboard navigation is unavailable. Please refresh the leaderboard.",
+                ephemeral=True,
+            )
+            return
+
+        embed = view.embeds.get(self.category)
+        if embed is None:
+            await interaction.response.send_message(
+                "This leaderboard category is unavailable right now.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.edit_message(embed=embed, view=view)
+
+
+class LeaderboardView(discord.ui.View):
+    """Single-message leaderboard navigation with persistent buttons."""
+
+    def __init__(self, players=None):
         super().__init__(timeout=None)
-        self.add_item(ShowAllDropsSelect(players))
+        self.embeds = {}
+        self.player_select = None
+        self._build_buttons()
+        if players:
+            self.set_players(players)
+
+    def _build_buttons(self):
+        self.clear_items()
+        self.add_item(LeaderboardCategoryButton("loot", "Loot", "💰"))
+        self.add_item(LeaderboardCategoryButton("deaths", "Deaths", "💀"))
+        self.add_item(LeaderboardCategoryButton("biggest", "Biggest Drop", "💎"))
+        self.add_item(LeaderboardCategoryButton("activity", "Activity", "📍"))
+
+        if self.player_select is not None:
+            self.add_item(self.player_select)
+
+    def set_players(self, players):
+        options = [
+            discord.SelectOption(
+                label=player[:100],
+                value=player[:100],
+                description="View all recorded drops",
+            )
+            for player in players[:25]
+        ]
+
+        if not options:
+            self.player_select = None
+        else:
+            self.player_select = ShowAllDropsSelect(options)
+
+        self._build_buttons()
+
+    def set_embeds(self, embeds):
+        self.embeds = embeds
+
+
+class ShowAllDropsSelect(discord.ui.Select):
+    def __init__(self, options):
+        super().__init__(
+            placeholder="Choose a player to show all drops...",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="leaderboard_show_all_drops",
+            row=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        player = self.values[0]
+        rows = get_player_loot_events(player)
+
+        if not rows:
+            await interaction.response.send_message(
+                f"No recorded drops found for **{player}**.",
+                ephemeral=True,
+            )
+            return
+
+        total = sum(row["value_gp"] or 0 for row in rows)
+        guild_id = interaction.guild_id
+        chunks = []
+        current = []
+
+        for row in rows:
+            item = row["loot_item"] or "Unknown item"
+            jump_url = (
+                f"https://discord.com/channels/{guild_id}/"
+                f"{row['channel_id']}/{row['message_id']}"
+            )
+            line = (
+                f"💎 **{format_gp(row['value_gp'] or 0)} GP** — "
+                f"**{item}** • [Show drop]({jump_url})"
+            )
+
+            candidate = line if not current else "\n".join(current + [line])
+            if current and len(candidate) > 3800:
+                chunks.append("\n".join(current))
+                current = [line]
+            else:
+                current.append(line)
+
+        if current:
+            chunks.append("\n".join(current))
+
+        embeds = []
+        for page_index, chunk in enumerate(chunks):
+            header = (
+                f"**{len(rows):,} {'drop' if len(rows) == 1 else 'drops'}** • "
+                f"**{format_gp(total)} GP** total\n"
+                f"⚠️ Only Dink drops of **500K GP+** are recorded.\n\n"
+            )
+            page_embed = discord.Embed(
+                title=f"💎 {player} — ALL DROPS",
+                description=header + chunk,
+                color=discord.Color.green(),
+                timestamp=datetime.now(timezone.utc),
+            )
+            page_embed.set_footer(
+                text=f"Page {page_index + 1}/{len(chunks)} • Updated automatically"
+            )
+            embeds.append(page_embed)
+
+        await interaction.response.send_message(embed=embeds[0], ephemeral=True)
+        for page_embed in embeds[1:]:
+            await interaction.followup.send(embed=page_embed, ephemeral=True)
 
 
 def get_biggest_drop_per_player(limit=15):
@@ -801,6 +940,8 @@ async def remove_old_combined_leaderboard(channel):
 
 async def update_leaderboard():
     async with update_lock:
+        global leaderboard_view
+
         channel = bot.get_channel(LEADERBOARD_CHANNEL_ID)
         if channel is None:
             try:
@@ -813,37 +954,46 @@ async def update_leaderboard():
         biggest_per_player_rows = get_biggest_drop_per_player(15)
         top_activity_rows = get_top_activity_per_player(15)
 
-        # Remove the old combined leaderboard and the old global "Biggest Drops" message.
-        await remove_old_combined_leaderboard(channel)
-        await delete_leaderboard_message(channel, "biggest_drops_message_id")
-
         # -------------------- LOOT LEADERBOARD --------------------
         loot_embed = discord.Embed(
             title="💰 LOOT LEADERBOARD",
-            description="━━━━━━━━━━━━━━━━━━━━\n**TOTAL LOOT RANKING**\n━━━━━━━━━━━━━━━━━━━━\nHighest recorded loot value per player.\n\n⚠️ Only Dink drops of **500K GP+** are recorded.",
+            description=(
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "**TOTAL LOOT RANKING**\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "Highest recorded loot value per player.\n\n"
+                "⚠️ Only Dink drops of **500K GP+** are recorded."
+            ),
             color=discord.Color.green(),
             timestamp=datetime.now(timezone.utc),
         )
+
         loot_rows = sorted(
             [r for r in rows if (r["loot_gp"] or 0) > 0],
             key=lambda r: (r["loot_gp"] or 0),
             reverse=True,
         )
+
         if loot_rows:
             lines = []
             medals = ["🥇", "🥈", "🥉"]
             for i, row in enumerate(loot_rows[:15], start=1):
-                prefix = medals[i-1] if i <= 3 else f"**{i}.**"
+                prefix = medals[i - 1] if i <= 3 else f"**{i}.**"
                 count = row["loot_drops"] or 0
                 lines.append(
                     f"{prefix} **{row['player']}** — **{format_gp(row['loot_gp'] or 0)} GP** "
                     f"↳ **{count:,} {'drop' if count == 1 else 'drops'}**"
                 )
+
             total_loot = sum(r["loot_gp"] or 0 for r in loot_rows)
             total_drops = sum(r["loot_drops"] or 0 for r in loot_rows)
+
             loot_embed.add_field(
                 name="📊 CLAN TOTALS",
-                value=f"💰 **{format_gp(total_loot)} GP** total loot   •   🎁 **{total_drops:,}** drops",
+                value=(
+                    f"💰 **{format_gp(total_loot)} GP** total loot   •   "
+                    f"🎁 **{total_drops:,}** drops"
+                ),
                 inline=False,
             )
             add_chunked_field(loot_embed, "🏆 TOP LOOTERS", lines)
@@ -853,101 +1003,147 @@ async def update_leaderboard():
         # -------------------- DEATH LEADERBOARD --------------------
         death_embed = discord.Embed(
             title="💀 DEATH LEADERBOARD",
-            description="━━━━━━━━━━━━━━━━━━━━\n**MOST DEATHS**\n━━━━━━━━━━━━━━━━━━━━\nPlayer deaths reported by Dink, ranked by death count.",
+            description=(
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "**MOST DEATHS**\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "Player deaths reported by Dink, ranked by death count."
+            ),
             color=discord.Color.red(),
             timestamp=datetime.now(timezone.utc),
         )
+
         death_rows = sorted(
             [r for r in rows if (r["deaths"] or 0) > 0],
             key=lambda r: (r["deaths"] or 0),
             reverse=True,
         )
+
         if death_rows:
             lines = []
             medals = ["🥇", "🥈", "🥉"]
             for i, row in enumerate(death_rows[:15], start=1):
-                prefix = medals[i-1] if i <= 3 else f"**{i}.**"
+                prefix = medals[i - 1] if i <= 3 else f"**{i}.**"
                 lost = row["death_value_gp"] or 0
                 suffix = f"\n　↳ 💸 {format_gp(lost)} GP PvP loss" if lost else ""
-                lines.append(f"{prefix} **{row['player']}** — **{row['deaths']:,} deaths**{suffix}")
+                lines.append(
+                    f"{prefix} **{row['player']}** — **{row['deaths']:,} deaths**{suffix}"
+                )
+
             add_chunked_field(death_embed, "Most Deaths", lines)
+
             total_deaths = sum(r["deaths"] or 0 for r in death_rows)
             total_loss = sum(r["death_value_gp"] or 0 for r in death_rows)
             death_embed.add_field(
                 name="📊 CLAN TOTALS",
-                value=f"💀 **{total_deaths:,}** deaths   •   💸 **{format_gp(total_loss)} GP** lost in PvP",
+                value=(
+                    f"💀 **{total_deaths:,}** deaths   •   "
+                    f"💸 **{format_gp(total_loss)} GP** lost in PvP"
+                ),
                 inline=False,
             )
         else:
             death_embed.description = "No deaths have been imported yet."
 
         # -------------------- BIGGEST DROP PER PLAYER --------------------
-        biggest_player_embed = discord.Embed(
+        biggest_embed = discord.Embed(
             title="💎 BIGGEST DROP PER PLAYER",
-            description="━━━━━━━━━━━━━━━━━━━━\n**PERSONAL RECORD DROPS**\n━━━━━━━━━━━━━━━━━━━━\nEach player's single most valuable recorded drop.\n\n⚠️ Only Dink drops of **500K GP+** are recorded.",
+            description=(
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "**PERSONAL RECORD DROPS**\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "Each player's single most valuable recorded drop.\n\n"
+                "⚠️ Only Dink drops of **500K GP+** are recorded."
+            ),
             color=discord.Color.purple(),
             timestamp=datetime.now(timezone.utc),
         )
+
         if biggest_per_player_rows:
             lines = []
             medals = ["🥇", "🥈", "🥉"]
             guild_id = getattr(getattr(channel, "guild", None), "id", None)
+
             for i, row in enumerate(biggest_per_player_rows, start=1):
-                prefix = medals[i-1] if i <= 3 else f"**{i}.**"
+                prefix = medals[i - 1] if i <= 3 else f"**{i}.**"
                 item = f" • {row['loot_item']}" if row["loot_item"] else ""
-                source = f" • {row['source']}" if row["source"] else ""
                 jump_url = (
                     f"https://discord.com/channels/{guild_id}/"
                     f"{row['channel_id']}/{row['message_id']}"
                     if guild_id else "https://discord.com"
                 )
                 lines.append(
-                    f"{prefix} **{row['player']}** — **{format_gp(row['value_gp'])} GP**{item} • [View drop]({jump_url})"
+                    f"{prefix} **{row['player']}** — "
+                    f"**{format_gp(row['value_gp'])} GP**{item} • "
+                    f"[View drop]({jump_url})"
                 )
-            # One list in the embed description — no (2/3), (3/3) field labels.
-            biggest_player_embed.description = "\n".join(lines)
-        else:
-            biggest_player_embed.description = "No loot drops have been imported yet."
 
-        # -------------------- MOST GP BY ACTIVITY --------------------
+            biggest_embed.description = "\n".join(lines)
+        else:
+            biggest_embed.description = "No loot drops have been imported yet."
+
+        # -------------------- MOST GP EARNED AT --------------------
         activity_embed = discord.Embed(
             title="📍 MOST GP EARNED AT",
-            description="━━━━━━━━━━━━━━━━━━━━\n**TOP ACTIVITY PER PLAYER**\n━━━━━━━━━━━━━━━━━━━━\nThe activity where each player has earned the most recorded GP.",
+            description=(
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "**TOP ACTIVITY PER PLAYER**\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "The activity where each player has earned the most recorded GP."
+            ),
             color=discord.Color.teal(),
             timestamp=datetime.now(timezone.utc),
         )
+
         if top_activity_rows:
             lines = []
             medals = ["🥇", "🥈", "🥉"]
             for i, row in enumerate(top_activity_rows, start=1):
-                prefix = medals[i-1] if i <= 3 else f"**{i}.**"
+                prefix = medals[i - 1] if i <= 3 else f"**{i}.**"
+                count = row["loot_drops"] or 0
                 lines.append(
-                    f"{prefix} **{row['player']}** — **{format_gp(row['loot_gp'] or 0)} GP**"
-                    f" • {row['source']} ({row['loot_drops'] or 0:,} {'drop' if (row['loot_drops'] or 0) == 1 else 'drops'})"
+                    f"{prefix} **{row['player']}** — "
+                    f"**{format_gp(row['loot_gp'] or 0)} GP** • "
+                    f"{row['source']} ({count:,} {'drop' if count == 1 else 'drops'})"
                 )
             activity_embed.description = "\n".join(lines)
         else:
             activity_embed.description = "No loot drops have been imported yet."
-        for _embed in (loot_embed, death_embed, biggest_player_embed, activity_embed):
-            _embed.set_footer(text="Updated automatically")
 
-        # Update the four current leaderboard messages.
-        leaderboard_messages = [
-            ("loot_leaderboard_message_id", loot_embed),
-            ("death_leaderboard_message_id", death_embed),
-            ("biggest_drop_per_player_message_id", biggest_player_embed),
-            ("top_activity_message_id", activity_embed),
-        ]
+        for embed in (loot_embed, death_embed, biggest_embed, activity_embed):
+            embed.set_footer(text="Updated automatically")
 
-        loot_players = [row["player"] for row in loot_rows[:25]]
-        loot_view = ShowAllDropsView(loot_players)
+        embeds = {
+            "loot": loot_embed,
+            "deaths": death_embed,
+            "biggest": biggest_embed,
+            "activity": activity_embed,
+        }
 
-        for setting_key, embed in leaderboard_messages:
-            try:
-                view = loot_view if setting_key == "loot_leaderboard_message_id" else None
-                await get_or_create_leaderboard_message(channel, setting_key, embed, view=view)
-            except discord.HTTPException as e:
-                print(f"Could not update '{setting_key}': {e}")
+        # Reuse one persistent View so buttons keep pointing at fresh embeds.
+        if leaderboard_view is None:
+            leaderboard_view = LeaderboardView()
+
+        leaderboard_view.set_embeds(embeds)
+        leaderboard_view.set_players([row["player"] for row in loot_rows[:25]])
+
+        # Migrate away from the previous four-message layout.
+        for old_key in (
+            "loot_leaderboard_message_id",
+            "death_leaderboard_message_id",
+            "biggest_drop_per_player_message_id",
+            "top_activity_message_id",
+            "biggest_drops_message_id",
+            "leaderboard_message_id",
+        ):
+            await delete_leaderboard_message(channel, old_key)
+
+        await get_or_create_leaderboard_message(
+            channel,
+            "combined_leaderboard_message_id",
+            loot_embed,
+            view=leaderboard_view,
+        )
 
 
 async def backfill_channel(channel_id: int):
@@ -973,18 +1169,12 @@ async def on_ready():
         print(f"Slash command sync failed: {e}")
 
     try:
-        stats = get_stats()
-        loot_players = [
-            row["player"]
-            for row in sorted(
-                [r for r in stats if (r["loot_gp"] or 0) > 0],
-                key=lambda r: (r["loot_gp"] or 0),
-                reverse=True,
-            )[:25]
-        ]
-        bot.add_view(ShowAllDropsView(loot_players))
+        await update_leaderboard()
+        # Register the same persistent view after it has been populated.
+        if leaderboard_view is not None:
+            bot.add_view(leaderboard_view)
     except Exception as e:
-        print(f"Could not register loot player dropdown: {e}")
+        print(f"Could not initialize combined leaderboard view: {e}")
 
     print("Bot is ready.")
 
