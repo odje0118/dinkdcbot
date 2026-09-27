@@ -1447,6 +1447,96 @@ async def debugplayer_command(interaction: discord.Interaction, player: str):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+
+@bot.tree.command(name="removeplayer", description="Remove a player and all recorded leaderboard data.")
+@app_commands.describe(username="The OSRS username to remove from the leaderboards")
+async def removeplayer_command(interaction: discord.Interaction, username: str):
+    """Permanently remove a player's recorded events and linked name aliases."""
+    await interaction.response.defer(ephemeral=True)
+
+    target_key = player_key(username)
+    if not target_key:
+        await interaction.followup.send("❌ Please enter a valid OSRS username.", ephemeral=True)
+        return
+
+    async with db_lock:
+        conn = db()
+
+        # Include the requested name plus any names linked through /namechange.
+        keys = {target_key}
+        names = {display_player_name(username)}
+
+        changed = True
+        while changed:
+            changed = False
+            rows = conn.execute(
+                "SELECT old_key, current_name FROM player_aliases"
+            ).fetchall()
+            for row in rows:
+                old_key = row["old_key"]
+                current_name = display_player_name(row["current_name"])
+                current_key = player_key(current_name)
+
+                if old_key in keys or current_key in keys:
+                    if old_key not in keys:
+                        keys.add(old_key)
+                        changed = True
+                    if current_key and current_key not in keys:
+                        keys.add(current_key)
+                        changed = True
+                    names.add(current_name)
+
+        placeholders = ",".join("?" for _ in keys)
+
+        # Delete every event belonging to the player or one of their linked names.
+        deleted_events = conn.execute(
+            f"""
+            DELETE FROM events
+            WHERE LOWER(REPLACE(player, ' ', '')) IN ({placeholders})
+            """,
+            tuple(keys),
+        ).rowcount
+
+        # Remove aliases associated with the deleted player profile.
+        deleted_aliases = conn.execute(
+            f"""
+            DELETE FROM player_aliases
+            WHERE old_key IN ({placeholders})
+               OR LOWER(REPLACE(current_name, ' ', '')) IN ({placeholders})
+            """,
+            tuple(keys) + tuple(keys),
+        ).rowcount
+
+        conn.commit()
+        conn.close()
+
+    await update_leaderboard()
+
+    if deleted_events == 0 and deleted_aliases == 0:
+        await interaction.followup.send(
+            f"ℹ️ No leaderboard data found for **{username}**.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.followup.send(
+        f"✅ Removed **{username}** from the leaderboards.\n"
+        f"🗑️ Deleted **{deleted_events:,}** recorded events"
+        + (f" and **{deleted_aliases:,}** linked name aliases." if deleted_aliases else "."),
+        ephemeral=True,
+    )
+
+
+@removeplayer_command.error
+async def removeplayer_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    print(f"Remove player command error: {error}")
+    if not interaction.response.is_done():
+        await interaction.response.send_message(
+            f"❌ Remove player failed: {error}",
+            ephemeral=True,
+        )
+
+
 @bot.tree.command(name="leaderboard", description="Show the current clan leaderboard.")
 async def leaderboard_command(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
