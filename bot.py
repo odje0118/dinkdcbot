@@ -594,12 +594,12 @@ def get_linked_discord_id(player: str):
     return int(row["discord_id"]) if row else None
 
 
-def get_weekly_loot_win_count(player_id):
+def get_weekly_loot_win_count(player):
     conn = db()
     try:
         row = conn.execute(
             "SELECT COUNT(*) AS wins FROM weekly_loot_wins WHERE player_id = ?",
-            (player_id,),
+            (player_key(player),),
         ).fetchone()
         return int(row["wins"] if row else 0)
     finally:
@@ -826,8 +826,7 @@ class PlayerDropsPages(discord.ui.View):
         page_rows = self.rows[start:start + self.per_page]
 
         total = sum(row["value_gp"] or 0 for row in self.rows)
-        player_row = get_player_by_name(self.player)
-        weekly_wins = get_weekly_loot_win_count(player_row["id"]) if player_row else 0
+        weekly_wins = get_weekly_loot_win_count(self.player)
         guild_id = None
         drops_channel = bot.get_channel(DROPS_CHANNEL_ID)
         if drops_channel and getattr(drops_channel, "guild", None):
@@ -1859,20 +1858,18 @@ async def weekly_loot_role_rotation():
 
         # Only mark the week as awarded after the role operation succeeds.
         if success:
-            winner_player = get_player_by_name(winner)
-            if winner_player:
-                conn = db()
-                try:
-                    conn.execute(
-                        """
-                        INSERT OR IGNORE INTO weekly_loot_wins(player_id, week_monday)
-                        VALUES(?, ?)
-                        """,
-                        (winner_player["id"], completed_week),
-                    )
-                    conn.commit()
-                finally:
-                    conn.close()
+            conn = db()
+            try:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO weekly_loot_wins(player_id, week_monday)
+                    VALUES(?, ?)
+                    """,
+                    (player_key(winner), completed_week),
+                )
+                conn.commit()
+            finally:
+                conn.close()
             set_last_awarded_week(completed_week)
     except Exception as exc:
         print(f"Weekly Loot Winner rotation error: {type(exc).__name__}: {exc}")
@@ -2149,7 +2146,7 @@ async def send_player_stats(interaction: discord.Interaction, player: str):
         timestamp=datetime.now(timezone.utc),
     )
     linked_discord_id = get_linked_discord_id(row["player"])
-    weekly_wins = get_weekly_loot_win_count(row["id"])
+    weekly_wins = get_weekly_loot_win_count(row["player"])
 
     embed.add_field(name="💰 Total Loot", value=f"**{format_gp(loot)} GP**", inline=True)
     embed.add_field(name="🏆 Weekly Loot Wins", value=f"**{weekly_wins}**", inline=True)
