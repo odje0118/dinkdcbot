@@ -679,13 +679,13 @@ class ShowAllDropsSelect(discord.ui.Select):
             )
             embeds.append(page_embed)
 
-        # Discord supports up to 10 embeds in one response. If necessary,
-        # send the first 10 and then continue with follow-up messages.
+        # Send the first page as the interaction response, then use
+        # follow-ups for the remaining pages.
         await interaction.response.send_message(
-            embeds=embeds[:10],
+            embed=embeds[0],
             ephemeral=True,
         )
-        for page_embed in embeds[10:]:
+        for page_embed in embeds[1:]:
             await interaction.followup.send(embed=page_embed, ephemeral=True)
 
 
