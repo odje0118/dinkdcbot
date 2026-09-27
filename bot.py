@@ -420,6 +420,50 @@ def add_chunked_field(embed: discord.Embed, field_name: str, lines):
         embed.add_field(name=name, value=chunk, inline=False)
 
 
+def get_weekly_loot_stats(limit=15):
+    """Return loot totals for the current Monday-Sunday week."""
+    conn = db()
+    rows = conn.execute(
+        """
+        WITH grouped AS (
+            SELECT
+                LOWER(REPLACE(player, ' ', '')) AS pkey,
+                SUM(value_gp) AS loot_gp,
+                COUNT(*) AS loot_drops
+            FROM events
+            WHERE event_type='loot'
+              AND datetime(created_at) >= datetime('now', 'localtime', 'weekday 1', '-7 days')
+              AND datetime(created_at) < datetime('now', 'localtime', 'weekday 1')
+            GROUP BY pkey
+        ),
+        latest_names AS (
+            SELECT
+                LOWER(REPLACE(e.player, ' ', '')) AS pkey,
+                e.player AS display_name
+            FROM events e
+            WHERE e.event_type='loot'
+              AND e.message_id = (
+                  SELECT e2.message_id
+                  FROM events e2
+                  WHERE e2.event_type='loot'
+                    AND LOWER(REPLACE(e2.player, ' ', '')) =
+                        LOWER(REPLACE(e.player, ' ', ''))
+                  ORDER BY datetime(e2.created_at) DESC, e2.message_id DESC
+                  LIMIT 1
+              )
+        )
+        SELECT n.display_name AS player, g.loot_gp, g.loot_drops
+        FROM grouped g
+        JOIN latest_names n ON n.pkey = g.pkey
+        ORDER BY g.loot_gp DESC, n.display_name COLLATE NOCASE
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
 def get_stats():
     conn = db()
     rows = conn.execute(
@@ -825,6 +869,7 @@ async def update_leaderboard():
                 return
 
         rows = get_stats()
+        weekly_loot_rows = get_weekly_loot_stats(15)
         biggest_per_player_rows = get_biggest_drop_per_player(15)
         top_activity_rows = get_top_activity_per_player(15)
 
@@ -862,6 +907,25 @@ async def update_leaderboard():
                 inline=False,
             )
             add_chunked_field(loot_embed, "🏆 TOP LOOTERS", lines)
+
+            weekly_lines = []
+            weekly_medals = ["🥇", "🥈", "🥉"]
+            for i, row in enumerate(weekly_loot_rows, start=1):
+                prefix = weekly_medals[i-1] if i <= 3 else f"**{i}.**"
+                count = row["loot_drops"] or 0
+                weekly_lines.append(
+                    f"{prefix} **{row['player']}** — **{format_gp(row['loot_gp'] or 0)} GP** "
+                    f"↳ **{count:,} {'drop' if count == 1 else 'drops'}**"
+                )
+
+            if weekly_lines:
+                add_chunked_field(loot_embed, "🔥 WEEKLY LOOT", weekly_lines)
+            else:
+                loot_embed.add_field(
+                    name="🔥 WEEKLY LOOT",
+                    value="No loot drops recorded this week yet.",
+                    inline=False,
+                )
         else:
             loot_embed.description = "No loot drops have been imported yet."
 
