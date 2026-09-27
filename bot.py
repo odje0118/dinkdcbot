@@ -636,21 +636,18 @@ class ShowAllDropsSelect(discord.ui.Select):
                 f"https://discord.com/channels/{guild_id}/"
                 f"{row['channel_id']}/{row['message_id']}"
             )
-            try:
-                dt = datetime.fromisoformat(row["created_at"])
-                date_text = dt.strftime("%d-%m-%Y")
-            except Exception:
-                date_text = ""
 
             line = (
                 f"💎 **{format_gp(row['value_gp'] or 0)} GP** — "
                 f"**{item}**{source} • [Show drop]({jump_url})"
             )
 
-            # Pack as many drops as possible into one field while staying
-            # safely below Discord's 1024-character field limit.
+            # Markdown links contain the full Discord message URL, which is
+            # counted toward Discord's embed character limit. Use the full
+            # embed description (up to ~5,000 chars) instead of a 1,024-char
+            # field so we can fit many more drops per message.
             candidate = line if not current else "\n".join(current + [line])
-            if current and len(candidate) > 1000:
+            if current and len(candidate) > 5000:
                 chunks.append("\n".join(current))
                 current = [line]
             else:
@@ -659,24 +656,18 @@ class ShowAllDropsSelect(discord.ui.Select):
         if current:
             chunks.append("\n".join(current))
 
-        # Discord allows max 25 fields per embed and also has an overall
-        # embed size limit. Split long histories into multiple embeds.
         embeds = []
         for page_index, chunk in enumerate(chunks):
+            header = (
+                f"**{len(rows):,} {'drop' if len(rows) == 1 else 'drops'}** • "
+                f"**{format_gp(total)} GP** total\n"
+                f"⚠️ Only Dink drops of **500K GP+** are recorded.\n\n"
+            )
             page_embed = discord.Embed(
                 title=f"💎 {player} — ALL DROPS",
-                description=(
-                    f"**{len(rows):,} {'drop' if len(rows) == 1 else 'drops'}** • "
-                    f"**{format_gp(total)} GP** total\n"
-                    f"⚠️ Only Dink drops of **500K GP+** are recorded."
-                ),
+                description=header + chunk,
                 color=discord.Color.green(),
                 timestamp=datetime.now(timezone.utc),
-            )
-            page_embed.add_field(
-                name="Drops" if page_index == 0 else "Drops (continued)",
-                value=chunk,
-                inline=False,
             )
             page_embed.set_footer(
                 text=f"Page {page_index + 1}/{len(chunks)} • Updated automatically"
