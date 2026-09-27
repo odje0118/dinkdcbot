@@ -616,21 +616,142 @@ def get_player_loot_events(player: str):
     return rows
 
 
-class ShowAllDropsSelect(discord.ui.Select):
-    def __init__(self, players):
-        options = [
-            discord.SelectOption(
-                label=player[:100],
-                value=player[:100],
-                description="View all recorded drops"[:100],
+class PlayerDropsPages(discord.ui.View):
+    """Paginated private view for all drops belonging to one player."""
+
+    def __init__(self, player, rows, owner_id):
+        super().__init__(timeout=300)
+        self.player = player
+        self.rows = list(rows)
+        self.owner_id = owner_id
+        self.page = 0
+        self.per_page = 10
+        self._refresh_buttons()
+
+    @property
+    def total_pages(self):
+        return max(1, (len(self.rows) + self.per_page - 1) // self.per_page)
+
+    def build_embed(self):
+        start = self.page * self.per_page
+        page_rows = self.rows[start:start + self.per_page]
+
+        total = sum(row["value_gp"] or 0 for row in self.rows)
+        guild_id = None
+        drops_channel = bot.get_channel(DROPS_CHANNEL_ID)
+        if drops_channel and getattr(drops_channel, "guild", None):
+            guild_id = drops_channel.guild.id
+
+        lines = []
+        for row in page_rows:
+            item = row["loot_item"] or "Unknown item"
+            jump_url = (
+                f"https://discord.com/channels/{guild_id}/"
+                f"{row['channel_id']}/{row['message_id']}"
+                if guild_id
+                else "https://discord.com"
             )
-            for player in players[:25]
-        ]
+            lines.append(
+                f"💎 **{format_gp(row['value_gp'] or 0)} GP** — "
+                f"**{item}** • [Show drop]({jump_url})"
+            )
+
+        embed = discord.Embed(
+            title=f"💎 {self.player} — ALL DROPS",
+            description=(
+                f"**{len(self.rows):,} "
+                f"{'drop' if len(self.rows) == 1 else 'drops'}** • "
+                f"**{format_gp(total)} GP** total\n"
+                f"⚠️ Only Dink drops of **500K GP+** are recorded.\n\n"
+                + "\n".join(lines)
+            ),
+            color=discord.Color.green(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.set_footer(
+            text=f"Page {self.page + 1}/{self.total_pages} • "
+                 f"Showing {start + 1}-{min(start + self.per_page, len(self.rows))} "
+                 f"of {len(self.rows)} drops"
+        )
+        return embed
+
+    def _refresh_buttons(self):
+        self.clear_items()
+
+        previous = discord.ui.Button(
+            label="Previous",
+            emoji="◀️",
+            style=discord.ButtonStyle.secondary,
+            disabled=self.page <= 0,
+        )
+        next_button = discord.ui.Button(
+            label="Next",
+            emoji="▶️",
+            style=discord.ButtonStyle.secondary,
+            disabled=self.page >= self.total_pages - 1,
+        )
+        close = discord.ui.Button(
+            label="Close",
+            emoji="✖️",
+            style=discord.ButtonStyle.danger,
+        )
+
+        async def previous_callback(interaction):
+            if not await self._check_owner(interaction):
+                return
+            self.page -= 1
+            self._refresh_buttons()
+            await interaction.response.edit_message(
+                embed=self.build_embed(),
+                view=self,
+            )
+
+        async def next_callback(interaction):
+            if not await self._check_owner(interaction):
+                return
+            self.page += 1
+            self._refresh_buttons()
+            await interaction.response.edit_message(
+                embed=self.build_embed(),
+                view=self,
+            )
+
+        async def close_callback(interaction):
+            if not await self._check_owner(interaction):
+                return
+            self.stop()
+            await interaction.response.edit_message(view=None)
+
+        previous.callback = previous_callback
+        next_button.callback = next_callback
+        close.callback = close_callback
+
+        self.add_item(previous)
+        self.add_item(next_button)
+        self.add_item(close)
+
+    async def _check_owner(self, interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "This player lookup belongs to someone else.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def on_timeout(self):
+        self.stop()
+
+
+class ShowAllDropsSelect(discord.ui.Select):
+    def __init__(self, options):
         super().__init__(
-            placeholder="Choose a player...",
+            placeholder="Choose a player to show all drops...",
             min_values=1,
             max_values=1,
             options=options,
+            custom_id="leaderboard_show_all_drops",
+            row=1,
         )
 
     async def callback(self, interaction: discord.Interaction):
@@ -644,74 +765,17 @@ class ShowAllDropsSelect(discord.ui.Select):
             )
             return
 
-        total = sum(row["value_gp"] or 0 for row in rows)
-        embed = discord.Embed(
-            title=f"💎 {player} — ALL DROPS",
-            description=(
-                f"**{len(rows):,} {'drop' if len(rows) == 1 else 'drops'}** • "
-                f"**{format_gp(total)} GP** total\n"
-                f"⚠️ Only Dink drops of **500K GP+** are recorded."
-            ),
-            color=discord.Color.green(),
-            timestamp=datetime.now(timezone.utc),
+        view = PlayerDropsPages(
+            player=player,
+            rows=rows,
+            owner_id=interaction.user.id,
         )
 
-        guild_id = interaction.guild_id
-        chunks = []
-        current = []
-
-        for row in rows:
-            item = row["loot_item"] or "Unknown item"
-            jump_url = (
-                f"https://discord.com/channels/{guild_id}/"
-                f"{row['channel_id']}/{row['message_id']}"
-            )
-
-            line = (
-                f"💎 **{format_gp(row['value_gp'] or 0)} GP** — "
-                f"**{item}** • [Show drop]({jump_url})"
-            )
-
-            # Markdown links contain the full Discord message URL, which is
-            # counted toward Discord's embed character limit. Use the full
-            # embed description (up to ~5,000 chars) instead of a 1,024-char
-            # field so we can fit many more drops per message.
-            candidate = line if not current else "\n".join(current + [line])
-            if current and len(candidate) > 3800:
-                chunks.append("\n".join(current))
-                current = [line]
-            else:
-                current.append(line)
-
-        if current:
-            chunks.append("\n".join(current))
-
-        embeds = []
-        for page_index, chunk in enumerate(chunks):
-            header = (
-                f"**{len(rows):,} {'drop' if len(rows) == 1 else 'drops'}** • "
-                f"**{format_gp(total)} GP** total\n"
-                f"⚠️ Only Dink drops of **500K GP+** are recorded.\n\n"
-            )
-            page_embed = discord.Embed(
-                title=f"💎 {player} — ALL DROPS",
-                description=header + chunk,
-                color=discord.Color.green(),
-                timestamp=datetime.now(timezone.utc),
-            )
-            page_embed.set_footer(
-                text=f"Page {page_index + 1}/{len(chunks)} • Updated automatically"
-            )
-            embeds.append(page_embed)
-
-        # Send the first page as the interaction response, then use
-        # follow-ups for the remaining pages.
         await interaction.response.send_message(
-            embed=embeds[0],
+            embed=view.build_embed(),
+            view=view,
             ephemeral=True,
         )
-        for page_embed in embeds[1:]:
-            await interaction.followup.send(embed=page_embed, ephemeral=True)
 
 
 class LeaderboardCategoryButton(discord.ui.Button):
