@@ -647,7 +647,7 @@ class ShowAllDropsSelect(discord.ui.Select):
             # embed description (up to ~5,000 chars) instead of a 1,024-char
             # field so we can fit many more drops per message.
             candidate = line if not current else "\n".join(current + [line])
-            if current and len(candidate) > 5000:
+            if current and len(candidate) > 3800:
                 chunks.append("\n".join(current))
                 current = [line]
             else:
