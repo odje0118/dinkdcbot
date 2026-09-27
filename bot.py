@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -15,6 +15,7 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 DROPS_CHANNEL_ID = 1540706808262430792
 DEATHS_CHANNEL_ID = 1540800494547640420
 LEADERBOARD_CHANNEL_ID = 1553383319696048208
+WEEKLY_LOOT_WINNER_ROLE_NAME = "Weekly Loot Winner"
 
 DB_FILE = os.getenv("DB_FILE", "leaderboard.db")
 
@@ -53,6 +54,12 @@ def init_db():
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS player_discord_links (
+            player_key TEXT PRIMARY KEY,
+            player_name TEXT NOT NULL,
+            discord_id INTEGER NOT NULL
         );
     """)
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(events)").fetchall()}
@@ -858,6 +865,116 @@ async def remove_old_combined_leaderboard(channel):
     conn.close()
 
 
+def get_linked_discord_id(player: str):
+    conn = db()
+    row = conn.execute(
+        "SELECT discord_id FROM player_discord_links WHERE player_key = ?",
+        (player_key(player),),
+    ).fetchone()
+    conn.close()
+    return int(row["discord_id"]) if row else None
+
+
+def set_linked_discord_id(player: str, discord_id: int):
+    conn = db()
+    conn.execute(
+        """
+        INSERT INTO player_discord_links (player_key, player_name, discord_id)
+        VALUES (?, ?, ?)
+        ON CONFLICT(player_key) DO UPDATE SET
+            player_name = excluded.player_name,
+            discord_id = excluded.discord_id
+        """,
+        (player_key(player), display_player_name(player), discord_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+async def get_weekly_loot_winner():
+    rows = get_weekly_loot_stats(1)
+    return rows[0]["player"] if rows else None
+
+
+async def get_weekly_loot_winner_role(guild: discord.Guild):
+    return discord.utils.get(guild.roles, name=WEEKLY_LOOT_WINNER_ROLE_NAME)
+
+
+async def remove_weekly_loot_role_from_others(guild: discord.Guild, keep_member_id: int | None = None):
+    role = await get_weekly_loot_winner_role(guild)
+    if role is None:
+        return None
+
+    removed = 0
+    for member in role.members:
+        if keep_member_id is not None and member.id == keep_member_id:
+            continue
+        try:
+            await member.remove_roles(role, reason="Weekly Loot Winner rotation")
+            removed += 1
+        except (discord.Forbidden, discord.HTTPException) as e:
+            print(f"Could not remove Weekly Loot Winner role from {member}: {e}")
+    return removed
+
+
+async def grant_weekly_loot_role(player: str, guild: discord.Guild):
+    role = await get_weekly_loot_winner_role(guild)
+    if role is None:
+        return False, f'Role "{WEEKLY_LOOT_WINNER_ROLE_NAME}" was not found in the server.'
+
+    discord_id = get_linked_discord_id(player)
+    if discord_id is None:
+        return False, f"No Discord ID is linked to **{player}**. Use `/lbadd {player} <discord id>` first."
+
+    member = guild.get_member(discord_id)
+    if member is None:
+        try:
+            member = await guild.fetch_member(discord_id)
+        except (discord.NotFound, discord.HTTPException):
+            return False, f"Could not find Discord member `{discord_id}` for **{player}**."
+
+    me = guild.me
+    if me is not None and role >= me.top_role:
+        return False, f'The role "{role.name}" is higher than or equal to my highest role, so I cannot manage it.'
+
+    await remove_weekly_loot_role_from_others(guild, keep_member_id=member.id)
+    try:
+        await member.add_roles(role, reason=f"Weekly Loot Winner: {player}")
+    except (discord.Forbidden, discord.HTTPException) as e:
+        print(f"Could not grant Weekly Loot Winner role to {member}: {e}")
+        return False, f"I could not grant the role to **{player}**: `{e}`"
+
+    return True, f'🏆 **{player}** now has the **{role.name}** role.'
+
+
+@tasks.loop(hours=1)
+async def weekly_loot_role_rotation():
+    try:
+        channel = bot.get_channel(LEADERBOARD_CHANNEL_ID)
+        if channel is None:
+            channel = await bot.fetch_channel(LEADERBOARD_CHANNEL_ID)
+        guild = getattr(channel, "guild", None)
+        if guild is None:
+            return
+
+        winner = await get_weekly_loot_winner()
+        if not winner:
+            return
+
+        success, message = await grant_weekly_loot_role(winner, guild)
+        if not success:
+            print(f"Weekly Loot Winner rotation: {message}")
+        else:
+            print(f"Weekly Loot Winner rotation: {message}")
+    except Exception as e:
+        print(f"Weekly Loot Winner rotation error: {type(e).__name__}: {e}")
+
+
+@weekly_loot_role_rotation.before_loop
+async def before_weekly_loot_role_rotation():
+    await bot.wait_until_ready()
+
+
 async def update_leaderboard():
     async with update_lock:
         channel = bot.get_channel(LEADERBOARD_CHANNEL_ID)
@@ -1099,6 +1216,9 @@ async def on_ready():
     except Exception as e:
         print(f"Could not register loot player dropdown: {e}")
 
+    if not weekly_loot_role_rotation.is_running():
+        weekly_loot_role_rotation.start()
+
     print("Bot is ready.")
 
 
@@ -1112,6 +1232,75 @@ async def on_message(message: discord.Message):
             await update_leaderboard()
 
     await bot.process_commands(message)
+
+
+@bot.tree.command(name="lbadd", description="Link a leaderboard player to a Discord member ID.")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(player="The exact leaderboard player name", discord_id="The Discord user ID to link to this player")
+async def lbadd_command(interaction: discord.Interaction, player: str, discord_id: str):
+    try:
+        member_id = int(discord_id.strip())
+    except ValueError:
+        await interaction.response.send_message("❌ The Discord ID must be a numeric Discord user ID.", ephemeral=True)
+        return
+
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
+        return
+
+    try:
+        member = guild.get_member(member_id)
+        if member is None:
+            member = await guild.fetch_member(member_id)
+    except (discord.NotFound, discord.HTTPException):
+        await interaction.response.send_message(f"❌ Could not find Discord member `{member_id}` in this server.", ephemeral=True)
+        return
+
+    set_linked_discord_id(player, member.id)
+    await interaction.response.send_message(
+        f"✅ Linked leaderboard player **{player}** to {member.mention} (`{member.id}`).",
+        ephemeral=True,
+    )
+
+
+@lbadd_command.error
+async def lbadd_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.errors.MissingPermissions):
+        msg = "You need **Manage Server** permission to use this command."
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    else:
+        print(f"lbadd command error: {error}")
+
+
+@bot.tree.command(name="lbrole", description="Immediately give a player the Weekly Loot Winner role.")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(player="The exact leaderboard player name")
+async def lbrole_command(interaction: discord.Interaction, player: str):
+    await interaction.response.defer(ephemeral=True)
+
+    guild = interaction.guild
+    if guild is None:
+        await interaction.followup.send("❌ This command can only be used in a server.", ephemeral=True)
+        return
+
+    success, message = await grant_weekly_loot_role(player, guild)
+    await interaction.followup.send(("✅ " if success else "❌ ") + message, ephemeral=True)
+
+
+@lbrole_command.error
+async def lbrole_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.errors.MissingPermissions):
+        msg = "You need **Manage Server** permission to use this command."
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    else:
+        print(f"lbrole command error: {error}")
 
 
 @bot.tree.command(name="leaderboard", description="Show the current clan leaderboard.")
