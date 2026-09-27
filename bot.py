@@ -1359,12 +1359,12 @@ async def backfill_channel(channel_id: int):
 async def on_ready():
     init_db()
     try:
+        # Sync globally as before.
         synced = await bot.tree.sync()
         print(f"Logged in as {bot.user}. Synced {len(synced)} global slash commands.")
 
-        # Also sync to the guild containing the Dink drops channel so newly
-        # added commands such as /namechange appear immediately, rather than
-        # waiting for Discord's global command propagation.
+        # Sync directly to the guild that owns the Dink drops channel.
+        # Guild slash commands propagate immediately after restart.
         drops_channel = bot.get_channel(DROPS_CHANNEL_ID)
         if drops_channel is None:
             drops_channel = await bot.fetch_channel(DROPS_CHANNEL_ID)
