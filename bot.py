@@ -919,17 +919,40 @@ async def update_leaderboard():
                 )
 
             weekly_header = (
-                "━━━━━━━━━━━━━━━━━━━━ **WEEKLY LOOT RANKING** ━━━━━━━━━━━━━━━━━━━━\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "**WEEKLY LOOT RANKING**\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
                 "Highest recorded loot value per player this week.\n"
-                "*Resets every Monday*"
+                "*Resets every Monday*\n\n"
             )
 
             if weekly_lines:
-                add_chunked_field(loot_embed, weekly_header, weekly_lines)
+                # Format this section the same way as TOTAL LOOT RANKING:
+                # separator, bold heading, separator, description, then rankings.
+                weekly_chunks = []
+                current = ""
+                for line in weekly_lines:
+                    candidate = line if not current else current + "\n" + line
+                    if len(weekly_header) + len(candidate) > 1000:
+                        if current:
+                            weekly_chunks.append(current)
+                        current = line
+                    else:
+                        current = candidate
+                if current:
+                    weekly_chunks.append(current)
+
+                for index, chunk in enumerate(weekly_chunks):
+                    value = weekly_header + chunk if index == 0 else chunk
+                    loot_embed.add_field(
+                        name="\u200b",
+                        value=value,
+                        inline=False,
+                    )
             else:
                 loot_embed.add_field(
-                    name=weekly_header,
-                    value="No loot drops recorded this week yet.",
+                    name="\u200b",
+                    value=weekly_header + "No loot drops recorded this week yet.",
                     inline=False,
                 )
         else:
