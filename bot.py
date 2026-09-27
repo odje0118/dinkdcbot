@@ -1835,9 +1835,9 @@ def build_weekly_winner_announcement(winner, discord_id, completed_week, role):
     return discord.Embed(
         title="🏆 WEEKLY LOOT WINNER",
         description=(
-            f"Congratulations {mention}!\\n\\n"
+            f"Congratulations {mention}!\n\n"
             f"You finished **#1** in the weekly loot ranking "
-            f"for the completed week starting **{completed_week}**.\\n\\n"
+            f"for the completed week starting **{completed_week}**.\n\n"
             f"🎖️ The {role_mention} role has been granted to you!"
         ),
         color=discord.Color.gold(),
@@ -1916,10 +1916,7 @@ async def weekly_loot_role_rotation():
                 announcement.set_footer(
                     text="The new weekly loot ranking has now started."
                 )
-                await announcement_channel.send(
-                    content=f"<@{int(discord_id)}> {winner_role.mention}",
-                    embed=announcement,
-                )
+                await announcement_channel.send(embed=announcement)
                 print(
                     f"Weekly Loot Winner announcement sent to channel "
                     f"{WEEKLY_LOOT_ANNOUNCEMENT_CHANNEL_ID}."
@@ -2069,10 +2066,7 @@ async def roletest_command(interaction: discord.Interaction, player: str):
         )
         embed.set_footer(text="The new weekly loot ranking has now started.")
 
-        await announcement_channel.send(
-            content=f"<@{int(discord_id)}> {winner_role.mention}",
-            embed=embed,
-        )
+        await announcement_channel.send(embed=embed)
 
         await interaction.followup.send(
             f"✅ Test successful. {mention} was given the "
