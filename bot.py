@@ -1197,10 +1197,17 @@ async def backfill_channel(channel_id: int):
 async def on_ready():
     init_db()
     try:
+        # Sync to each connected guild as well as globally so newly added
+        # slash commands appear immediately in the servers where the bot is installed.
         synced = await bot.tree.sync()
-        print(f"Logged in as {bot.user}. Synced {len(synced)} slash commands.")
+        print(f"Logged in as {bot.user}. Synced {len(synced)} global slash commands.")
+
+        for guild in bot.guilds:
+            bot.tree.copy_global_to(guild=guild)
+            guild_synced = await bot.tree.sync(guild=guild)
+            print(f"Synced {len(guild_synced)} guild slash commands to {guild.name} ({guild.id}).")
     except Exception as e:
-        print(f"Slash command sync failed: {e}")
+        print(f"Slash command sync failed: {type(e).__name__}: {e}")
 
     try:
         stats = get_stats()
