@@ -719,7 +719,7 @@ class PlayerDropsPages(discord.ui.View):
         )
 
         async def previous_callback(interaction):
-            _log_interaction_readable(interaction, "previous_callback")
+            _log_interaction_readable(interaction, "Previous Page")
             if not await self._check_owner(interaction):
                 return
             self.page -= 1
@@ -730,7 +730,7 @@ class PlayerDropsPages(discord.ui.View):
             )
 
         async def next_callback(interaction):
-            _log_interaction_readable(interaction, "next_callback")
+            _log_interaction_readable(interaction, "Next Page")
             if not await self._check_owner(interaction):
                 return
             self.page += 1
@@ -741,7 +741,7 @@ class PlayerDropsPages(discord.ui.View):
             )
 
         async def close_callback(interaction):
-            _log_interaction_readable(interaction, "close_callback")
+            _log_interaction_readable(interaction, "Close")
             if not await self._check_owner(interaction):
                 return
             self.stop()
@@ -762,7 +762,6 @@ class PlayerDropsPages(discord.ui.View):
         self.add_item(close)
 
     async def _check_owner(self, interaction):
-        _log_interaction_readable(interaction, "_check_owner")
         if interaction.user.id != self.owner_id:
             await interaction.response.send_message(
                 "This player lookup belongs to someone else.",
@@ -787,8 +786,8 @@ class ShowAllDropsSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        _log_interaction_readable(interaction, "callback")
         player = self.values[0]
+        _log_interaction_readable(interaction, "Show All Drops", player=player)
         rows = get_player_loot_events(player)
 
         if not rows:
@@ -823,7 +822,7 @@ class LeaderboardCategoryButton(discord.ui.Button):
         self.category = category
 
     async def callback(self, interaction: discord.Interaction):
-        _log_interaction_readable(interaction, "callback")
+        _log_interaction_readable(interaction, f"Leaderboard Category: {self.category.title()}")
         view = self.view
         if view is None:
             await interaction.response.send_message(
@@ -1324,7 +1323,6 @@ async def on_message_edit(before: discord.Message, after: discord.Message):
 @app_commands.describe(player="The exact player name to inspect")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def debugplayer_command(interaction: discord.Interaction, player: str):
-    _log_interaction_readable(interaction, "debugplayer_command")
     conn = db()
     rows = conn.execute(
         """
@@ -1358,7 +1356,6 @@ async def debugplayer_command(interaction: discord.Interaction, player: str):
 
 @bot.tree.command(name="leaderboard", description="Show the current clan leaderboard.")
 async def leaderboard_command(interaction: discord.Interaction):
-    _log_interaction_readable(interaction, "leaderboard_command")
     await interaction.response.defer(ephemeral=True)
     await update_leaderboard()
     await interaction.followup.send(
@@ -1368,7 +1365,6 @@ async def leaderboard_command(interaction: discord.Interaction):
 
 
 async def send_player_stats(interaction: discord.Interaction, player: str):
-    _log_interaction_readable(interaction, "send_player_stats")
     row = get_player_stats(player)
 
     if not row or not row['player']:
@@ -1402,7 +1398,6 @@ async def send_player_stats(interaction: discord.Interaction, player: str):
 @bot.tree.command(name="refreshnames", description="Refresh displayed player names from the latest stored Dink event.")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def refreshnames_command(interaction: discord.Interaction):
-    _log_interaction_readable(interaction, "refreshnames_command")
     await interaction.response.defer(ephemeral=True)
     conn = db()
     # For each case/space-insensitive player group, copy the latest-seen spelling
@@ -1450,7 +1445,6 @@ async def refreshnames_command(interaction: discord.Interaction):
 
 @refreshnames_command.error
 async def refreshnames_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    _log_interaction_readable(interaction, "refreshnames_error")
     msg = "You need **Manage Server** permission to use this command."
     if isinstance(error, app_commands.errors.MissingPermissions):
         if interaction.response.is_done():
@@ -1464,21 +1458,18 @@ async def refreshnames_error(interaction: discord.Interaction, error: app_comman
 @bot.tree.command(name="stats", description="Show stats for a player.")
 @app_commands.describe(player="The exact player name")
 async def stats_command(interaction: discord.Interaction, player: str):
-    _log_interaction_readable(interaction, "stats_command")
     await send_player_stats(interaction, player)
 
 
 @bot.tree.command(name="player", description="Show detailed stats for a player.")
 @app_commands.describe(player="The exact player name")
 async def player_command(interaction: discord.Interaction, player: str):
-    _log_interaction_readable(interaction, "player_command")
     await send_player_stats(interaction, player)
 
 
 @bot.tree.command(name="backfill", description="Import existing Dink messages from DROPS and DEATHS.")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def backfill_command(interaction: discord.Interaction):
-    _log_interaction_readable(interaction, "backfill_command")
     await interaction.response.defer(ephemeral=True)
 
     drops = await backfill_channel(DROPS_CHANNEL_ID)
