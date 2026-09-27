@@ -541,41 +541,41 @@ def weekly_reset_countdown():
 
 
 def get_weekly_loot_stats(limit=15):
-    """Return loot totals for the current Monday-Sunday week."""
+    """Return the current Monday-Sunday weekly ranking.
+
+    ONLY this weekly ranking combines multiple OSRS accounts that are linked
+    to the same Discord ID. All other leaderboards continue to use OSRS names.
+    Linked players are displayed by Discord ID; unlinked players remain shown
+    by their OSRS name.
+    """
     conn = db()
     rows = conn.execute(
         """
         WITH grouped AS (
             SELECT
-                LOWER(REPLACE(player, ' ', '')) AS pkey,
-                SUM(value_gp) AS loot_gp,
+                CASE
+                    WHEN pdl.discord_id IS NOT NULL
+                        THEN 'discord:' || CAST(pdl.discord_id AS TEXT)
+                    ELSE 'player:' || LOWER(REPLACE(e.player, ' ', ''))
+                END AS ranking_key,
+                CASE
+                    WHEN pdl.discord_id IS NOT NULL
+                        THEN CAST(pdl.discord_id AS TEXT)
+                    ELSE e.player
+                END AS display_name,
+                SUM(e.value_gp) AS loot_gp,
                 COUNT(*) AS loot_drops
-            FROM events
-            WHERE event_type='loot'
-              AND datetime(created_at) >= datetime('now', 'localtime', 'weekday 1', '-7 days')
-              AND datetime(created_at) < datetime('now', 'localtime', 'weekday 1')
-            GROUP BY pkey
-        ),
-        latest_names AS (
-            SELECT
-                LOWER(REPLACE(e.player, ' ', '')) AS pkey,
-                e.player AS display_name
             FROM events e
+            LEFT JOIN player_discord_links pdl
+                ON pdl.player_key = LOWER(REPLACE(e.player, ' ', ''))
             WHERE e.event_type='loot'
-              AND e.message_id = (
-                  SELECT e2.message_id
-                  FROM events e2
-                  WHERE e2.event_type='loot'
-                    AND LOWER(REPLACE(e2.player, ' ', '')) =
-                        LOWER(REPLACE(e.player, ' ', ''))
-                  ORDER BY datetime(e2.created_at) DESC, e2.message_id DESC
-                  LIMIT 1
-              )
+              AND datetime(e.created_at) >= datetime('now', 'localtime', 'weekday 1', '-7 days')
+              AND datetime(e.created_at) < datetime('now', 'localtime', 'weekday 1')
+            GROUP BY ranking_key, display_name
         )
-        SELECT n.display_name AS player, g.loot_gp, g.loot_drops
-        FROM grouped g
-        JOIN latest_names n ON n.pkey = g.pkey
-        ORDER BY g.loot_gp DESC, n.display_name COLLATE NOCASE
+        SELECT display_name AS player, loot_gp, loot_drops
+        FROM grouped
+        ORDER BY loot_gp DESC, display_name COLLATE NOCASE
         LIMIT ?
         """,
         (limit,),
