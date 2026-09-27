@@ -89,6 +89,12 @@ def init_db():
             current_name TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS weekly_loot_wins (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            player_id INTEGER NOT NULL,
+            week_monday TEXT NOT NULL UNIQUE
+        );
+
         CREATE TABLE IF NOT EXISTS player_discord_links (
             player_key TEXT PRIMARY KEY,
             player_name TEXT NOT NULL,
@@ -588,6 +594,18 @@ def get_linked_discord_id(player: str):
     return int(row["discord_id"]) if row else None
 
 
+def get_weekly_loot_win_count(player_id):
+    conn = db()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS wins FROM weekly_loot_wins WHERE player_id = ?",
+            (player_id,),
+        ).fetchone()
+        return int(row["wins"] if row else 0)
+    finally:
+        conn.close()
+
+
 def set_linked_discord_id(player: str, discord_id: int):
     conn = db()
     conn.execute(
@@ -808,6 +826,8 @@ class PlayerDropsPages(discord.ui.View):
         page_rows = self.rows[start:start + self.per_page]
 
         total = sum(row["value_gp"] or 0 for row in self.rows)
+        player_row = get_player_by_name(self.player)
+        weekly_wins = get_weekly_loot_win_count(player_row["id"]) if player_row else 0
         guild_id = None
         drops_channel = bot.get_channel(DROPS_CHANNEL_ID)
         if drops_channel and getattr(drops_channel, "guild", None):
@@ -833,6 +853,7 @@ class PlayerDropsPages(discord.ui.View):
                 f"**{len(self.rows):,} "
                 f"{'drop' if len(self.rows) == 1 else 'drops'}** • "
                 f"**{format_gp(total)} GP** total\n"
+                f"🏆 **Weekly Loot Wins: {weekly_wins}**\n"
                 f"⚠️ Only Dink drops of **500K GP+** are recorded.\n\n"
                 + "\n".join(lines)
             ),
@@ -1720,9 +1741,108 @@ async def grant_weekly_loot_role(player: str, guild: discord.Guild):
     return True, f"🏆 **{player}** now has the **{role.name}** role."
 
 
+WEEKLY_WINNER_LAST_AWARDED_KEY = "weekly_winner_last_awarded_week"
+
+
+def get_previous_completed_week_key():
+    """Return the Monday date for the most recently completed Monday-Sunday week."""
+    now = datetime.now()
+    this_monday = now - timedelta(days=now.weekday())
+    this_monday = this_monday.replace(hour=0, minute=0, second=0, microsecond=0)
+    previous_monday = this_monday - timedelta(days=7)
+    return previous_monday.strftime("%Y-%m-%d")
+
+
+def get_last_awarded_week():
+    conn = db()
+    try:
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key = ?",
+            (WEEKLY_WINNER_LAST_AWARDED_KEY,),
+        ).fetchone()
+        return row["value"] if row else None
+    finally:
+        conn.close()
+
+
+def set_last_awarded_week(week_key):
+    conn = db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO settings(key, value)
+            VALUES(?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (WEEKLY_WINNER_LAST_AWARDED_KEY, week_key),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_completed_weekly_loot_winner(week_monday):
+    """Return the winner of the completed Monday-Sunday week."""
+    conn = db()
+    try:
+        row = conn.execute(
+            """
+            WITH grouped AS (
+                SELECT
+                    LOWER(REPLACE(player, ' ', '')) AS pkey,
+                    SUM(value_gp) AS loot_gp
+                FROM events
+                WHERE event_type='loot'
+                  AND datetime(created_at) >= datetime(?, '00:00:00')
+                  AND datetime(created_at) < datetime(?, '+7 days', '00:00:00')
+                GROUP BY pkey
+            ),
+            latest_names AS (
+                SELECT
+                    LOWER(REPLACE(e.player, ' ', '')) AS pkey,
+                    e.player AS display_name
+                FROM events e
+                WHERE e.event_type='loot'
+                  AND e.message_id = (
+                      SELECT e2.message_id
+                      FROM events e2
+                      WHERE e2.event_type='loot'
+                        AND LOWER(REPLACE(e2.player, ' ', '')) =
+                            LOWER(REPLACE(e.player, ' ', ''))
+                        AND datetime(e2.created_at) >= datetime(?, '00:00:00')
+                        AND datetime(e2.created_at) < datetime(?, '+7 days', '00:00:00')
+                      ORDER BY datetime(e2.created_at) DESC, e2.message_id DESC
+                      LIMIT 1
+                  )
+            )
+            SELECT n.display_name AS player
+            FROM grouped g
+            JOIN latest_names n ON n.pkey = g.pkey
+            ORDER BY g.loot_gp DESC, n.display_name COLLATE NOCASE
+            LIMIT 1
+            """,
+            (week_monday, week_monday, week_monday, week_monday),
+        ).fetchone()
+        return row["player"] if row else None
+    finally:
+        conn.close()
+
+
 @tasks.loop(hours=1)
 async def weekly_loot_role_rotation():
     try:
+        # Only the winner of the most recently COMPLETED week receives
+        # the role. The active week's current #1 is never awarded.
+        completed_week = get_previous_completed_week_key()
+
+        # Prevent re-awarding the same completed week every hour.
+        if get_last_awarded_week() == completed_week:
+            return
+
+        winner = get_completed_weekly_loot_winner(completed_week)
+        if not winner:
+            return
+
         drops_channel = bot.get_channel(DROPS_CHANNEL_ID)
         if drops_channel is None:
             drops_channel = await bot.fetch_channel(DROPS_CHANNEL_ID)
@@ -1731,12 +1851,29 @@ async def weekly_loot_role_rotation():
         if guild is None:
             return
 
-        winner = await get_weekly_loot_winner()
-        if not winner:
-            return
-
         success, message = await grant_weekly_loot_role(winner, guild)
-        print(f"Weekly Loot Winner rotation: {message}")
+        print(
+            f"Weekly Loot Winner rotation for completed week "
+            f"{completed_week}: {message}"
+        )
+
+        # Only mark the week as awarded after the role operation succeeds.
+        if success:
+            winner_player = get_player_by_name(winner)
+            if winner_player:
+                conn = db()
+                try:
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO weekly_loot_wins(player_id, week_monday)
+                        VALUES(?, ?)
+                        """,
+                        (winner_player["id"], completed_week),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+            set_last_awarded_week(completed_week)
     except Exception as exc:
         print(f"Weekly Loot Winner rotation error: {type(exc).__name__}: {exc}")
 
@@ -1849,7 +1986,6 @@ async def debugplayer_command(interaction: discord.Interaction, player: str):
 
 
 @bot.tree.command(name="removeplayer", description="Remove a player and all recorded leaderboard data.")
-@app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.describe(username="The OSRS username to remove from the leaderboards")
 async def removeplayer_command(interaction: discord.Interaction, username: str):
     """Permanently remove a player's recorded events and linked name aliases."""
@@ -2013,8 +2149,10 @@ async def send_player_stats(interaction: discord.Interaction, player: str):
         timestamp=datetime.now(timezone.utc),
     )
     linked_discord_id = get_linked_discord_id(row["player"])
+    weekly_wins = get_weekly_loot_win_count(row["id"])
 
     embed.add_field(name="💰 Total Loot", value=f"**{format_gp(loot)} GP**", inline=True)
+    embed.add_field(name="🏆 Weekly Loot Wins", value=f"**{weekly_wins}**", inline=True)
     embed.add_field(name="🎁 Loot Drops", value=f"**{drops:,}**", inline=True)
     embed.add_field(name="💀 Deaths", value=f"**{deaths:,}**", inline=True)
     embed.add_field(name="💸 PvP GP Lost", value=f"**{format_gp(death_value)} GP**", inline=True)
@@ -2036,7 +2174,6 @@ async def send_player_stats(interaction: discord.Interaction, player: str):
 
 
 @bot.tree.command(name="namechange", description="Merge an old OSRS username into a new username.")
-@app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.describe(
     old_name="The player's previous OSRS username",
     new_name="The player's new OSRS username",
@@ -2229,6 +2366,12 @@ async def refreshnames_error(interaction: discord.Interaction, error: app_comman
             await interaction.response.send_message(msg, ephemeral=True)
     else:
         print(f"Refresh names command error: {error}")
+
+
+@bot.tree.command(name="stats", description="Show stats for a player.")
+@app_commands.describe(player="The exact player name")
+async def stats_command(interaction: discord.Interaction, player: str):
+    await send_player_stats(interaction, player)
 
 
 @bot.tree.command(name="player", description="Show detailed stats for a player.")
