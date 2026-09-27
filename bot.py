@@ -507,6 +507,27 @@ def add_chunked_field(embed: discord.Embed, field_name: str, lines):
         embed.add_field(name=name, value=chunk, inline=False)
 
 
+def weekly_reset_countdown():
+    """Return a human-readable countdown to the next Monday 00:00."""
+    now = datetime.now()
+    days_until_monday = (7 - now.weekday()) % 7
+    next_monday = (now + timedelta(days=days_until_monday)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+
+    # If it is already Monday after midnight, target the following Monday.
+    if next_monday <= now:
+        next_monday += timedelta(days=7)
+
+    remaining = next_monday - now
+    total_seconds = max(0, int(remaining.total_seconds()))
+    days, remainder = divmod(total_seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, _ = divmod(remainder, 60)
+
+    return f"{days}d {hours}h {minutes}m"
+
+
 def get_weekly_loot_stats(limit=15):
     """Return loot totals for the current Monday-Sunday week."""
     conn = db()
@@ -1138,7 +1159,7 @@ async def update_leaderboard():
             total_drops = sum(r["loot_drops"] or 0 for r in loot_rows)
 
             loot_embed.add_field(
-                name="📊 GROUP TOTALS",
+                name="📊 CLAN TOTALS",
                 value=(
                     f"💰 **{format_gp(total_loot)} GP** total loot   •   "
                     f"🎁 **{total_drops:,}** drops"
@@ -1163,7 +1184,7 @@ async def update_leaderboard():
                 "**WEEKLY LOOT RANKING**\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
                 "Highest recorded loot value per player this week.\n"
-                "*Resets every Monday*\n\n"
+                f"⏱️ **Resets in: {weekly_reset_countdown()}**\n\n"
             )
 
             if weekly_lines:
@@ -1231,7 +1252,7 @@ async def update_leaderboard():
             total_deaths = sum(r["deaths"] or 0 for r in death_rows)
             total_loss = sum(r["death_value_gp"] or 0 for r in death_rows)
             death_embed.add_field(
-                name="📊 GROUP TOTALS",
+                name="📊 CLAN TOTALS",
                 value=(
                     f"💀 **{total_deaths:,}** deaths   •   "
                     f"💸 **{format_gp(total_loss)} GP** lost in PvP"
