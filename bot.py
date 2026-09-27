@@ -1845,6 +1845,7 @@ def build_weekly_winner_announcement(winner, discord_id, completed_week, role):
     )
 
 
+@tasks.loop(hours=1)
 async def weekly_loot_role_rotation():
     try:
         # Only the winner of the most recently COMPLETED week receives
