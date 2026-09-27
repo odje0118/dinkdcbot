@@ -918,11 +918,17 @@ async def update_leaderboard():
                     f"↳ **{count:,} {'drop' if count == 1 else 'drops'}**"
                 )
 
+            weekly_header = (
+                "━━━━━━━━━━━━━━━━━━━━ **WEEKLY LOOT RANKING** ━━━━━━━━━━━━━━━━━━━━\n"
+                "Highest recorded loot value per player this week.\n"
+                "*Resets every Monday*"
+            )
+
             if weekly_lines:
-                add_chunked_field(loot_embed, "🔥 WEEKLY LOOT", weekly_lines)
+                add_chunked_field(loot_embed, weekly_header, weekly_lines)
             else:
                 loot_embed.add_field(
-                    name="🔥 WEEKLY LOOT",
+                    name=weekly_header,
                     value="No loot drops recorded this week yet.",
                     inline=False,
                 )
