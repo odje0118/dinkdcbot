@@ -1044,8 +1044,8 @@ async def update_leaderboard():
             total_loot = sum(r["loot_gp"] or 0 for r in loot_rows)
             total_drops = sum(r["loot_drops"] or 0 for r in loot_rows)
             loot_embed.add_field(
-                name="📊 CLAN TOTALS",
-                value=f"💰 **{format_gp(total_loot)} GP** total loot   •   🎁 **{total_drops:,}** drops",
+                name="📊 GROUP TOTALS",
+                value=f"💰 **{format_gp(total_loot)} GP** total loot   •   🎁 **{total_drops:,}** drops\n\n",
                 inline=False,
             )
             add_chunked_field(loot_embed, "🏆 TOP LOOTERS", lines)
@@ -1103,7 +1103,7 @@ async def update_leaderboard():
         # -------------------- DEATH LEADERBOARD --------------------
         death_embed = discord.Embed(
             title="💀 DEATH LEADERBOARD",
-            description="━━━━━━━━━━━━━━━━━━━━\n**MOST DEATHS**\n━━━━━━━━━━━━━━━━━━━━\nPlayer deaths reported by Dink, ranked by death count.",
+            description="━━━━━━━━━━━━━━━━━━━━\n**MOST DEATHS**\n━━━━━━━━━━━━━━━━━━━━\nPlayer deaths reported, ranked by death count.",
             color=discord.Color.red(),
             timestamp=datetime.now(timezone.utc),
         )
@@ -1124,7 +1124,7 @@ async def update_leaderboard():
             total_deaths = sum(r["deaths"] or 0 for r in death_rows)
             total_loss = sum(r["death_value_gp"] or 0 for r in death_rows)
             death_embed.add_field(
-                name="📊 CLAN TOTALS",
+                name="📊 GROUP TOTALS",
                 value=f"💀 **{total_deaths:,}** deaths   •   💸 **{format_gp(total_loss)} GP** lost in PvP",
                 inline=False,
             )
@@ -1152,7 +1152,7 @@ async def update_leaderboard():
                     if guild_id else "https://discord.com"
                 )
                 lines.append(
-                    f"{prefix} **{row['player']}** — **{format_gp(row['value_gp'])} GP**{item} • [View drop]({jump_url})"
+                    f"{prefix} **{row['player']}** — **{format_gp(row['value_gp'])} GP**{item} • [Show drop]({jump_url})"
                 )
             # One list in the embed description — no (2/3), (3/3) field labels.
             biggest_player_embed.description = "\n".join(lines)
