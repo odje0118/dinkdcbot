@@ -545,7 +545,7 @@ def get_weekly_loot_stats(limit=15):
 
     ONLY this weekly ranking combines multiple OSRS accounts that are linked
     to the same Discord ID. All other leaderboards continue to use OSRS names.
-    Linked players are displayed by Discord ID; unlinked players remain shown
+    Linked players are displayed as Discord mentions; unlinked players remain shown
     by their OSRS name.
     """
     conn = db()
@@ -560,7 +560,7 @@ def get_weekly_loot_stats(limit=15):
                 END AS ranking_key,
                 CASE
                     WHEN pdl.discord_id IS NOT NULL
-                        THEN CAST(pdl.discord_id AS TEXT)
+                        THEN '<@' || CAST(pdl.discord_id AS TEXT) || '>'
                     ELSE e.player
                 END AS display_name,
                 SUM(e.value_gp) AS loot_gp,
