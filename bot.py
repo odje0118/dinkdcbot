@@ -573,7 +573,11 @@ def get_weekly_loot_stats(limit=15):
               AND datetime(e.created_at) < datetime('now', 'localtime', 'weekday 1')
             GROUP BY ranking_key, display_name
         )
-        SELECT display_name AS player, loot_gp, loot_drops
+        SELECT
+            display_name AS player,
+            loot_gp,
+            loot_drops,
+            ranking_key
         FROM grouped
         ORDER BY loot_gp DESC, display_name COLLATE NOCASE
         LIMIT ?
@@ -979,6 +983,192 @@ class ShowAllDropsSelect(discord.ui.Select):
         )
 
 
+def get_weekly_group_drops(ranking_key):
+    """Return all loot drops for one weekly ranking group.
+
+    ranking_key is either discord:<id> (all linked OSRS accounts combined)
+    or player:<normalized_name> (an unlinked OSRS account).
+    """
+    conn = db()
+    try:
+        if ranking_key.startswith("discord:"):
+            discord_id = int(ranking_key.split(":", 1)[1])
+            rows = conn.execute(
+                """
+                SELECT e.player, e.value_gp, e.source, e.loot_item,
+                       e.created_at, e.message_id, e.channel_id
+                FROM events e
+                JOIN player_discord_links pdl
+                  ON pdl.player_key = LOWER(REPLACE(e.player, ' ', ''))
+                WHERE e.event_type='loot'
+                  AND pdl.discord_id = ?
+                  AND datetime(e.created_at) >= datetime('now', 'localtime', 'weekday 1', '-7 days')
+                  AND datetime(e.created_at) < datetime('now', 'localtime', 'weekday 1')
+                ORDER BY datetime(e.created_at) DESC, e.message_id DESC
+                """,
+                (discord_id,),
+            ).fetchall()
+        else:
+            player_key_value = ranking_key.split(":", 1)[1]
+            rows = conn.execute(
+                """
+                SELECT player, value_gp, source, loot_item,
+                       created_at, message_id, channel_id
+                FROM events
+                WHERE event_type='loot'
+                  AND LOWER(REPLACE(player, ' ', '')) = ?
+                  AND datetime(created_at) >= datetime('now', 'localtime', 'weekday 1', '-7 days')
+                  AND datetime(created_at) < datetime('now', 'localtime', 'weekday 1')
+                ORDER BY datetime(created_at) DESC, message_id DESC
+                """,
+                (player_key_value,),
+            ).fetchall()
+        return rows
+    finally:
+        conn.close()
+
+
+class WeeklyDropsPages(discord.ui.View):
+    def __init__(self, title, rows, owner_id):
+        super().__init__(timeout=180)
+        self.title = title
+        self.rows = rows
+        self.owner_id = owner_id
+        self.page = 0
+        self.per_page = 10
+        self._refresh_buttons()
+
+    def _refresh_buttons(self):
+        self.clear_items()
+
+        previous = discord.ui.Button(
+            label="Previous",
+            emoji="◀️",
+            style=discord.ButtonStyle.secondary,
+            disabled=self.page <= 0,
+        )
+        next_button = discord.ui.Button(
+            label="Next",
+            emoji="▶️",
+            style=discord.ButtonStyle.secondary,
+            disabled=(self.page + 1) * self.per_page >= len(self.rows),
+        )
+
+        async def previous_callback(interaction):
+            if interaction.user.id != self.owner_id:
+                await interaction.response.send_message(
+                    "This menu belongs to the person who opened it.",
+                    ephemeral=True,
+                )
+                return
+            self.page -= 1
+            self._refresh_buttons()
+            await interaction.response.edit_message(
+                embed=self.build_embed(),
+                view=self,
+            )
+
+        async def next_callback(interaction):
+            if interaction.user.id != self.owner_id:
+                await interaction.response.send_message(
+                    "This menu belongs to the person who opened it.",
+                    ephemeral=True,
+                )
+                return
+            self.page += 1
+            self._refresh_buttons()
+            await interaction.response.edit_message(
+                embed=self.build_embed(),
+                view=self,
+            )
+
+        previous.callback = previous_callback
+        next_button.callback = next_callback
+        self.add_item(previous)
+        self.add_item(next_button)
+
+    def build_embed(self):
+        start = self.page * self.per_page
+        page_rows = self.rows[start:start + self.per_page]
+
+        embed = discord.Embed(
+            title=f"📦 WEEKLY DROPS — {self.title}",
+            description=(
+                "All recorded loot drops for this Discord account / OSRS account "
+                "group during the current Monday-Sunday week."
+            ),
+            color=discord.Color.gold(),
+            timestamp=datetime.now(timezone.utc),
+        )
+
+        lines = []
+        for row in page_rows:
+            item = f" • {row['loot_item']}" if row["loot_item"] else ""
+            jump = (
+                f"https://discord.com/channels/{row['channel_id']}/{row['message_id']}"
+                if row["channel_id"] and row["message_id"]
+                else None
+            )
+            value_text = f"**{format_gp(row['value_gp'] or 0)} GP**{item}"
+            if jump:
+                value_text = f"[{value_text}]({jump})"
+            lines.append(
+                f"**{row['created_at']}** — "
+                f"{row['player']} — {value_text}"
+            )
+
+        embed.description += "\n\n" + (
+            "\n".join(lines) if lines else "No recorded drops."
+        )
+        embed.set_footer(
+            text=f"Page {self.page + 1} • {len(self.rows)} total weekly drops"
+        )
+        return embed
+
+
+class WeeklyDropsButton(discord.ui.Button):
+    def __init__(self, ranking_key, label, row):
+        super().__init__(
+            label=label[:80],
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"weekly_drops_{ranking_key.replace(':', '_')}"[:100],
+            row=row,
+        )
+        self.ranking_key = ranking_key
+
+    async def callback(self, interaction: discord.Interaction):
+        _log_interaction_readable(
+            interaction,
+            "Weekly Drops",
+            player=self.ranking_key,
+        )
+
+        rows = get_weekly_group_drops(self.ranking_key)
+        if not rows:
+            await interaction.response.send_message(
+                "No weekly drops were found for this ranking entry.",
+                ephemeral=True,
+            )
+            return
+
+        # Mention linked Discord users; otherwise show the OSRS account key.
+        if self.ranking_key.startswith("discord:"):
+            title = f"<@{self.ranking_key.split(':', 1)[1]}>"
+        else:
+            title = self.ranking_key.split(":", 1)[1]
+
+        view = WeeklyDropsPages(
+            title=title,
+            rows=rows,
+            owner_id=interaction.user.id,
+        )
+        await interaction.response.send_message(
+            embed=view.build_embed(),
+            view=view,
+            ephemeral=True,
+        )
+
+
 class LeaderboardCategoryButton(discord.ui.Button):
     def __init__(self, category, label, emoji):
         super().__init__(
@@ -1018,6 +1208,7 @@ class LeaderboardView(discord.ui.View):
         super().__init__(timeout=None)
         self.embeds = {}
         self.player_select = None
+        self.weekly_rows = []
         self._build_buttons()
         if players:
             self.set_players(players)
@@ -1031,6 +1222,24 @@ class LeaderboardView(discord.ui.View):
 
         if self.player_select is not None:
             self.add_item(self.player_select)
+
+        # Up to 15 weekly entries, 5 per action row. The drop-count button
+        # itself is the clickable element that opens the weekly drop menu.
+        for index, weekly_row in enumerate(self.weekly_rows[:15]):
+            action_row = 2 + (index // 5)
+            count = weekly_row["loot_drops"] or 0
+            label = f"{count:,} {'drop' if count == 1 else 'drops'}"
+            self.add_item(
+                WeeklyDropsButton(
+                    weekly_row["ranking_key"],
+                    label,
+                    action_row,
+                )
+            )
+
+    def set_weekly_rows(self, rows):
+        self.weekly_rows = list(rows or [])
+        self._build_buttons()
 
     def set_players(self, players):
         options = [
@@ -1412,6 +1621,7 @@ async def update_leaderboard():
             leaderboard_view = LeaderboardView()
 
         leaderboard_view.set_embeds(embeds)
+        leaderboard_view.set_weekly_rows(weekly_loot_rows[:15])
         leaderboard_view.set_players([row["player"] for row in loot_rows[:25]])
 
         # Migrate away from the previous four-message layout.
