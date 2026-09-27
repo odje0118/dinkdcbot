@@ -16,26 +16,6 @@ DROPS_CHANNEL_ID = 1540706808262430792
 DEATHS_CHANNEL_ID = 1540800494547640420
 LEADERBOARD_CHANNEL_ID = 1553383319696048208
 
-# Discord role awarded to the winner of the completed weekly loot ranking.
-WEEKLY_WINNER_ROLE_NAME = "🏆 Weekly Loot Winner"
-
-# In-game player -> Discord user ID mappings. Multiple in-game accounts can
-# point to the same Discord account. Keys use player_key() normalization.
-PLAYER_DISCORD_IDS = {
-    "p0lm": 759630411608752138,
-    "takamaka": 504121192320335872,
-    "gim_rody": 504121192320335872,
-    "lessstress": 701048806006849586,
-    "gim_devonn": 701048806006849586,
-    "flippinwhip": 420184043511087117,
-    "nospacetime": 260600856129437696,
-    "gim_barfnell": 260600856129437696,
-    "billenbloat": 260600856129437696,
-    "3mmessej": 1325087379987496983,
-    "gim_jetli": 474738896006152203,
-    "viettommy": 474738896006152203,
-}
-
 DB_FILE = os.getenv("DB_FILE", "leaderboard.db")
 
 intents = discord.Intents.default()
@@ -44,7 +24,6 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 db_lock = asyncio.Lock()
 update_lock = asyncio.Lock()
-weekly_role_task = None
 
 
 def db():
@@ -115,46 +94,6 @@ def player_key(name: str) -> str:
     if not name:
         return ""
     return re.sub(r"\s+", "", name).casefold()
-
-
-def get_player_discord_id(player_name: str):
-    """Return a player Discord ID from the database, falling back to the built-in mapping."""
-    key = player_key(player_name)
-    if not key:
-        return None
-
-    conn = db()
-    row = conn.execute(
-        "SELECT value FROM settings WHERE key=?",
-        (f"player_discord_id:{key}",),
-    ).fetchone()
-    conn.close()
-
-    if row:
-        try:
-            return int(row["value"])
-        except (TypeError, ValueError):
-            pass
-
-    return PLAYER_DISCORD_IDS.get(key)
-
-
-def set_player_discord_id(player_name: str, discord_id: int):
-    """Persist the Discord ID assigned to an in-game player."""
-    key = player_key(player_name)
-    if not key:
-        raise ValueError("Invalid player name.")
-
-    conn = db()
-    conn.execute(
-        """
-        INSERT INTO settings(key, value) VALUES(?, ?)
-        ON CONFLICT(key) DO UPDATE SET value=excluded.value
-        """,
-        (f"player_discord_id:{key}", str(discord_id)),
-    )
-    conn.commit()
-    conn.close()
 
 
 def display_player_name(name: str) -> str:
@@ -524,61 +463,6 @@ def get_weekly_loot_stats(limit=15):
     conn.close()
     return rows
 
-
-
-def get_previous_week_loot_stats(limit=1):
-    """Return loot totals for the most recently completed Monday-Sunday week."""
-    conn = db()
-    rows = conn.execute(
-        """
-        WITH bounds AS (
-            SELECT
-                date(
-                    'now', 'localtime',
-                    '-' || ((CAST(strftime('%w', 'now', 'localtime') AS INTEGER) + 6) % 7) || ' days'
-                ) AS current_monday
-        ),
-        grouped AS (
-            SELECT
-                LOWER(REPLACE(player, ' ', '')) AS pkey,
-                SUM(value_gp) AS loot_gp,
-                COUNT(*) AS loot_drops
-            FROM events, bounds
-            WHERE event_type='loot'
-              AND datetime(created_at) >= datetime(current_monday, '-7 days')
-              AND datetime(created_at) < datetime(current_monday)
-            GROUP BY pkey
-        ),
-        latest_names AS (
-            SELECT
-                LOWER(REPLACE(e.player, ' ', '')) AS pkey,
-                e.player AS display_name
-            FROM events e, bounds
-            WHERE e.event_type='loot'
-              AND datetime(e.created_at) >= datetime(bounds.current_monday, '-7 days')
-              AND datetime(e.created_at) < datetime(bounds.current_monday)
-              AND e.message_id = (
-                  SELECT e2.message_id
-                  FROM events e2
-                  WHERE e2.event_type='loot'
-                    AND datetime(e2.created_at) >= datetime(bounds.current_monday, '-7 days')
-                    AND datetime(e2.created_at) < datetime(bounds.current_monday)
-                    AND LOWER(REPLACE(e2.player, ' ', '')) =
-                        LOWER(REPLACE(e.player, ' ', ''))
-                  ORDER BY datetime(e2.created_at) DESC, e2.message_id DESC
-                  LIMIT 1
-              )
-        )
-        SELECT n.display_name AS player, g.loot_gp, g.loot_drops
-        FROM grouped g
-        JOIN latest_names n ON n.pkey = g.pkey
-        ORDER BY g.loot_gp DESC, n.display_name COLLATE NOCASE
-        LIMIT ?
-        """,
-        (limit,),
-    ).fetchall()
-    conn.close()
-    return rows
 
 def get_stats():
     conn = db()
@@ -1034,12 +918,41 @@ async def update_leaderboard():
                     f"↳ **{count:,} {'drop' if count == 1 else 'drops'}**"
                 )
 
+            weekly_header = (
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "**WEEKLY LOOT RANKING**\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "Highest recorded loot value per player this week.\n"
+                "*Resets every Monday*\n\n"
+            )
+
             if weekly_lines:
-                add_chunked_field(loot_embed, "🔥 WEEKLY LOOT", weekly_lines)
+                # Format this section the same way as TOTAL LOOT RANKING:
+                # separator, bold heading, separator, description, then rankings.
+                weekly_chunks = []
+                current = ""
+                for line in weekly_lines:
+                    candidate = line if not current else current + "\n" + line
+                    if len(weekly_header) + len(candidate) > 1000:
+                        if current:
+                            weekly_chunks.append(current)
+                        current = line
+                    else:
+                        current = candidate
+                if current:
+                    weekly_chunks.append(current)
+
+                for index, chunk in enumerate(weekly_chunks):
+                    value = weekly_header + chunk if index == 0 else chunk
+                    loot_embed.add_field(
+                        name="\u200b",
+                        value=value,
+                        inline=False,
+                    )
             else:
                 loot_embed.add_field(
-                    name="🔥 WEEKLY LOOT",
-                    value="No loot drops recorded this week yet.",
+                    name="\u200b",
+                    value=weekly_header + "No loot drops recorded this week yet.",
                     inline=False,
                 )
         else:
@@ -1145,143 +1058,6 @@ async def update_leaderboard():
                 print(f"Could not update '{setting_key}': {e}")
 
 
-
-async def get_or_create_weekly_winner_role(guild: discord.Guild) -> discord.Role:
-    """Find the weekly winner role or create it if it does not exist."""
-    role = discord.utils.get(guild.roles, name=WEEKLY_WINNER_ROLE_NAME)
-    if role is not None:
-        return role
-
-    return await guild.create_role(
-        name=WEEKLY_WINNER_ROLE_NAME,
-        reason="Weekly loot leaderboard winner role",
-    )
-
-
-async def clear_weekly_winner_role(guild: discord.Guild, role: discord.Role):
-    """Remove the weekly winner role from every member currently holding it."""
-    for member in list(role.members):
-        try:
-            await member.remove_roles(
-                role,
-                reason="Weekly loot winner changed",
-            )
-        except (discord.Forbidden, discord.HTTPException) as e:
-            print(f"Could not remove weekly winner role from {member}: {e}")
-
-
-async def assign_weekly_winner_role(guild: discord.Guild, player_name: str) -> bool:
-    """Assign the weekly winner role to the Discord account mapped to player_name."""
-    discord_id = get_player_discord_id(player_name)
-    if discord_id is None:
-        print(
-            f"No Discord ID configured for weekly loot winner '{player_name}'. "
-            "Add it to PLAYER_DISCORD_IDS."
-        )
-        return False
-
-    role = await get_or_create_weekly_winner_role(guild)
-    await clear_weekly_winner_role(guild, role)
-
-    member = guild.get_member(discord_id)
-    if member is None:
-        try:
-            member = await guild.fetch_member(discord_id)
-        except discord.NotFound:
-            print(f"Discord member {discord_id} for '{player_name}' was not found in the server.")
-            return False
-        except discord.HTTPException as e:
-            print(f"Could not fetch Discord member {discord_id}: {e}")
-            return False
-
-    try:
-        await member.add_roles(
-            role,
-            reason=f"Weekly loot winner: {player_name}",
-        )
-        print(f"Assigned '{WEEKLY_WINNER_ROLE_NAME}' to {member} for weekly winner {player_name}.")
-        return True
-    except discord.Forbidden:
-        print(
-            f"Could not assign '{WEEKLY_WINNER_ROLE_NAME}' to {member}. "
-            "Check Manage Roles permission and make sure the bot's highest role is above the winner role."
-        )
-        return False
-    except discord.HTTPException as e:
-        print(f"Could not assign weekly winner role to {member}: {e}")
-        return False
-
-
-async def award_previous_week_winner(guild: discord.Guild) -> bool:
-    """Award the winner of the most recently completed Monday-Sunday week.
-
-    The award is keyed to the current week's Monday, so it happens only once
-    per completed week even if the bot restarts or is offline for a while.
-    """
-    conn = db()
-    row = conn.execute(
-        """
-        SELECT date(
-            'now', 'localtime',
-            '-' || ((CAST(strftime('%w', 'now', 'localtime') AS INTEGER) + 6) % 7) || ' days'
-        ) AS current_monday
-        """
-    ).fetchone()
-    current_monday = row["current_monday"]
-
-    setting = conn.execute(
-        "SELECT value FROM settings WHERE key=?",
-        ("weekly_winner_awarded_week",),
-    ).fetchone()
-    conn.close()
-
-    if setting and setting["value"] == current_monday:
-        return False
-
-    rows = get_previous_week_loot_stats(1)
-    role = await get_or_create_weekly_winner_role(guild)
-
-    # Remove the previous winner as soon as a new completed week is being processed.
-    await clear_weekly_winner_role(guild, role)
-
-    if not rows:
-        print("No weekly loot winner found for the completed week.")
-    else:
-        winner = rows[0]["player"]
-        if not await assign_weekly_winner_role(guild, winner):
-            return False
-        print(f"Weekly loot winner for the completed week: {winner}")
-
-    conn = db()
-    conn.execute(
-        """
-        INSERT INTO settings(key, value) VALUES(?, ?)
-        ON CONFLICT(key) DO UPDATE SET value=excluded.value
-        """,
-        ("weekly_winner_awarded_week", current_monday),
-    )
-    conn.commit()
-    conn.close()
-    return True
-
-
-async def weekly_winner_scheduler():
-    """Check periodically and award the completed week winner once per week."""
-    await asyncio.sleep(5)
-    while not bot.is_closed():
-        try:
-            channel = bot.get_channel(LEADERBOARD_CHANNEL_ID)
-            guild = getattr(channel, "guild", None) if channel else None
-            if guild:
-                await award_previous_week_winner(guild)
-        except Exception as e:
-            print(f"Weekly winner scheduler error: {type(e).__name__}: {e}")
-
-        # Hourly is enough because the role only changes at the start of a week.
-        await asyncio.sleep(3600)
-
-
-
 async def backfill_channel(channel_id: int):
     channel = bot.get_channel(channel_id)
     if channel is None:
@@ -1322,18 +1098,6 @@ async def on_ready():
         bot.add_view(ShowAllDropsView(loot_players))
     except Exception as e:
         print(f"Could not register loot player dropdown: {e}")
-
-    try:
-        channel = bot.get_channel(LEADERBOARD_CHANNEL_ID)
-        guild = getattr(channel, "guild", None) if channel else None
-        if guild:
-            await award_previous_week_winner(guild)
-    except Exception as e:
-        print(f"Could not award weekly loot winner: {type(e).__name__}: {e}")
-
-    global weekly_role_task
-    if weekly_role_task is None or weekly_role_task.done():
-        weekly_role_task = asyncio.create_task(weekly_winner_scheduler())
 
     print("Bot is ready.")
 
@@ -1461,108 +1225,6 @@ async def stats_command(interaction: discord.Interaction, player: str):
 @app_commands.describe(player="The exact player name")
 async def player_command(interaction: discord.Interaction, player: str):
     await send_player_stats(interaction, player)
-
-
-@bot.tree.command(name="lbid", description="Assign a Discord ID to an in-game player.")
-@app_commands.describe(
-    player="The exact in-game player name",
-    discord_id="The Discord user ID to link to this player",
-)
-@app_commands.checks.has_permissions(manage_guild=True)
-async def lbid_command(
-    interaction: discord.Interaction,
-    player: str,
-    discord_id: str,
-):
-    if interaction.guild is None:
-        await interaction.response.send_message(
-            "This command can only be used inside a Discord server.",
-            ephemeral=True,
-        )
-        return
-
-    discord_id = discord_id.strip()
-
-    if not discord_id.isdigit():
-        await interaction.response.send_message(
-            "❌ The Discord ID must contain numbers only.",
-            ephemeral=True,
-        )
-        return
-
-    try:
-        user_id = int(discord_id)
-    except ValueError:
-        await interaction.response.send_message(
-            "❌ Invalid Discord ID.",
-            ephemeral=True,
-        )
-        return
-
-    # Confirm that the account exists in this server.
-    try:
-        member = interaction.guild.get_member(user_id)
-        if member is None:
-            member = await interaction.guild.fetch_member(user_id)
-    except discord.NotFound:
-        await interaction.response.send_message(
-            f"❌ I couldn't find Discord ID `{user_id}` in this server.",
-            ephemeral=True,
-        )
-        return
-    except discord.HTTPException as e:
-        await interaction.response.send_message(
-            f"❌ Discord returned an error while looking up that ID: `{e}`",
-            ephemeral=True,
-        )
-        return
-
-    set_player_discord_id(player, user_id)
-
-    await interaction.response.send_message(
-        f"✅ **{player}** is now linked to {member.mention} (`{user_id}`).\n"
-        f"This mapping is saved permanently and will be used for the **{WEEKLY_WINNER_ROLE_NAME}** role.",
-        ephemeral=True,
-    )
-
-
-@bot.tree.command(name="testrole", description="Give the Weekly Loot Winner role to a player.")
-@app_commands.describe(player="The exact in-game player name")
-async def testrole_command(interaction: discord.Interaction, player: str):
-    if interaction.guild is None:
-        await interaction.response.send_message(
-            "This command can only be used inside a Discord server.",
-            ephemeral=True,
-        )
-        return
-
-    discord_id = get_player_discord_id(player)
-    if discord_id is None:
-        await interaction.response.send_message(
-            f"❌ No Discord ID is configured for **{player}**.",
-            ephemeral=True,
-        )
-        return
-
-    await interaction.response.defer(ephemeral=True)
-
-    try:
-        success = await assign_weekly_winner_role(interaction.guild, player)
-    except discord.Forbidden:
-        success = False
-
-    if success:
-        await interaction.followup.send(
-            f"🏆 **{WEEKLY_WINNER_ROLE_NAME}** was given to <@{discord_id}> "
-            f"for **{player}**.",
-            ephemeral=True,
-        )
-    else:
-        await interaction.followup.send(
-            "❌ I could not give the role. Make sure the bot has **Manage Roles** "
-            "and that its highest role is above **🏆 Weekly Loot Winner**.",
-            ephemeral=True,
-        )
 
 
 @bot.tree.command(name="backfill", description="Import existing Dink messages from DROPS and DEATHS.")
