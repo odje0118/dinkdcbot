@@ -6,7 +6,7 @@ from datetime import datetime, timezone, timedelta
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -15,6 +15,7 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 DROPS_CHANNEL_ID = 1540706808262430792
 DEATHS_CHANNEL_ID = 1540800494547640420
 LEADERBOARD_CHANNEL_ID = 1553383319696048208
+WEEKLY_LOOT_WINNER_ROLE_NAME = "Weekly Loot Winner"
 
 DB_FILE = os.getenv("DB_FILE", "leaderboard.db")
 
@@ -86,6 +87,12 @@ def init_db():
         CREATE TABLE IF NOT EXISTS player_aliases (
             old_key TEXT PRIMARY KEY,
             current_name TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS player_discord_links (
+            player_key TEXT PRIMARY KEY,
+            player_name TEXT NOT NULL,
+            discord_id INTEGER NOT NULL
         );
     """)
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(events)").fetchall()}
@@ -569,6 +576,50 @@ def get_weekly_loot_stats(limit=15):
     ).fetchall()
     conn.close()
     return rows
+
+
+def get_linked_discord_id(player: str):
+    conn = db()
+    row = conn.execute(
+        "SELECT discord_id FROM player_discord_links WHERE player_key = ?",
+        (player_key(player),),
+    ).fetchone()
+    conn.close()
+    return int(row["discord_id"]) if row else None
+
+
+def set_linked_discord_id(player: str, discord_id: int):
+    conn = db()
+    conn.execute(
+        """
+        INSERT INTO player_discord_links(player_key, player_name, discord_id)
+        VALUES (?, ?, ?)
+        ON CONFLICT(player_key) DO UPDATE SET
+            player_name = excluded.player_name,
+            discord_id = excluded.discord_id
+        """,
+        (player_key(player), display_player_name(player), discord_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def remove_linked_discord_id(player: str):
+    conn = db()
+    conn.execute(
+        "DELETE FROM player_discord_links WHERE player_key = ?",
+        (player_key(player),),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_all_leaderboard_players():
+    rows = get_stats()
+    return sorted(
+        [row["player"] for row in rows if row["player"]],
+        key=lambda name: name.casefold(),
+    )
 
 
 def get_stats():
@@ -1375,6 +1426,326 @@ async def backfill_channel(channel_id: int):
     return processed
 
 
+class DiscordIdModal(discord.ui.Modal):
+    def __init__(self, player: str, parent_view):
+        super().__init__(title=f"Link Discord ID — {player[:35]}")
+        self.player = player
+        self.parent_view = parent_view
+
+        self.discord_id = discord.ui.TextInput(
+            label="Discord User ID",
+            placeholder="Paste the Discord user ID here (or leave blank to unlink)",
+            required=False,
+            max_length=20,
+        )
+        self.add_item(self.discord_id)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = self.discord_id.value.strip()
+
+        if not raw:
+            remove_linked_discord_id(self.player)
+            await interaction.response.send_message(
+                f"🔓 Removed the Discord ID link from **{self.player}**.",
+                ephemeral=True,
+            )
+            await self.parent_view.refresh(interaction)
+            return
+
+        if not raw.isdigit():
+            await interaction.response.send_message(
+                "❌ The Discord ID must contain numbers only.",
+                ephemeral=True,
+            )
+            return
+
+        discord_id = int(raw)
+
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "❌ This command can only be used in a server.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            member = interaction.guild.get_member(discord_id)
+            if member is None:
+                member = await interaction.guild.fetch_member(discord_id)
+        except (discord.NotFound, discord.HTTPException):
+            await interaction.response.send_message(
+                f"❌ I could not find Discord member `{discord_id}` in this server.",
+                ephemeral=True,
+            )
+            return
+
+        set_linked_discord_id(self.player, member.id)
+
+        await interaction.response.send_message(
+            f"✅ Linked **{self.player}** to {member.mention} (`{member.id}`).",
+            ephemeral=True,
+        )
+        await self.parent_view.refresh(interaction)
+
+
+class ShowIdsView(discord.ui.View):
+    PAGE_SIZE = 25
+
+    def __init__(self, interaction: discord.Interaction):
+        super().__init__(timeout=300)
+        self.owner_id = interaction.user.id
+        self.page = 0
+        self.players = get_all_leaderboard_players()
+        self.message = None
+        self.select = None
+        self.rebuild_items()
+
+    def page_count(self):
+        return max(1, (len(self.players) + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+
+    def current_players(self):
+        start = self.page * self.PAGE_SIZE
+        return self.players[start:start + self.PAGE_SIZE]
+
+    def rebuild_items(self):
+        # Remove old dynamic components.
+        self.clear_items()
+
+        current = self.current_players()
+        options = []
+
+        for player in current:
+            linked_id = get_linked_discord_id(player)
+            if linked_id:
+                label = f"{player} — linked"
+                description = f"Discord ID: {linked_id}"
+            else:
+                label = f"{player} — not linked"
+                description = "No Discord ID assigned"
+
+            options.append(
+                discord.SelectOption(
+                    label=label[:100],
+                    value=player,
+                    description=description[:100],
+                )
+            )
+
+        if options:
+            self.select = discord.ui.Select(
+                placeholder="Select a player to assign a Discord ID...",
+                options=options,
+                min_values=1,
+                max_values=1,
+                row=0,
+            )
+
+            async def select_callback(interaction: discord.Interaction):
+                if interaction.user.id != self.owner_id:
+                    await interaction.response.send_message(
+                        "❌ This menu belongs to the person who opened it.",
+                        ephemeral=True,
+                    )
+                    return
+
+                player = self.select.values[0]
+                await interaction.response.send_modal(
+                    DiscordIdModal(player, self)
+                )
+
+            self.select.callback = select_callback
+            self.add_item(self.select)
+
+        previous_button = discord.ui.Button(
+            label="◀ Previous",
+            style=discord.ButtonStyle.secondary,
+            disabled=self.page <= 0,
+            row=1,
+        )
+        next_button = discord.ui.Button(
+            label="Next ▶",
+            style=discord.ButtonStyle.secondary,
+            disabled=self.page >= self.page_count() - 1,
+            row=1,
+        )
+        close_button = discord.ui.Button(
+            label="Close",
+            style=discord.ButtonStyle.danger,
+            row=1,
+        )
+
+        async def previous_callback(interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                await interaction.response.send_message(
+                    "❌ This menu belongs to the person who opened it.",
+                    ephemeral=True,
+                )
+                return
+            self.page -= 1
+            self.rebuild_items()
+            await interaction.response.edit_message(
+                embed=self.make_embed(),
+                view=self,
+            )
+
+        async def next_callback(interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                await interaction.response.send_message(
+                    "❌ This menu belongs to the person who opened it.",
+                    ephemeral=True,
+                )
+                return
+            self.page += 1
+            self.rebuild_items()
+            await interaction.response.edit_message(
+                embed=self.make_embed(),
+                view=self,
+            )
+
+        async def close_callback(interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                await interaction.response.send_message(
+                    "❌ This menu belongs to the person who opened it.",
+                    ephemeral=True,
+                )
+                return
+            await interaction.response.edit_message(
+                content="🔒 Discord ID manager closed.",
+                embed=None,
+                view=None,
+            )
+            self.stop()
+
+        previous_button.callback = previous_callback
+        next_button.callback = next_callback
+        close_button.callback = close_callback
+
+        self.add_item(previous_button)
+        self.add_item(next_button)
+        self.add_item(close_button)
+
+    def make_embed(self):
+        total = len(self.players)
+        linked = sum(
+            1 for player in self.players if get_linked_discord_id(player)
+        )
+        start = self.page * self.PAGE_SIZE + 1 if total else 0
+        end = min((self.page + 1) * self.PAGE_SIZE, total)
+
+        embed = discord.Embed(
+            title="🔗 PLAYER DISCORD ID MANAGER",
+            description=(
+                "Select a leaderboard player below to assign their Discord ID.\n\n"
+                f"**Players:** {total:,} • **Linked:** {linked:,} • "
+                f"**Unlinked:** {total - linked:,}\n"
+                f"Showing **{start:,}–{end:,}** • Page **{self.page + 1}/{self.page_count()}**\n\n"
+                "After selecting a player, paste their Discord User ID. "
+                "Leave it blank to remove an existing link."
+            ),
+            color=discord.Color.blurple(),
+        )
+        return embed
+
+    async def refresh(self, interaction: discord.Interaction):
+        # Rebuild the player list in case /namechange or /removeplayer changed it.
+        self.players = get_all_leaderboard_players()
+        self.page = min(self.page, self.page_count() - 1)
+        self.rebuild_items()
+
+        if self.message:
+            try:
+                await self.message.edit(embed=self.make_embed(), view=self)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+
+async def get_weekly_loot_winner():
+    rows = get_weekly_loot_stats(1)
+    return rows[0]["player"] if rows else None
+
+
+async def get_weekly_loot_winner_role(guild: discord.Guild):
+    return discord.utils.get(guild.roles, name=WEEKLY_LOOT_WINNER_ROLE_NAME)
+
+
+async def remove_weekly_loot_role_from_others(
+    guild: discord.Guild, keep_member_id: int | None = None
+):
+    role = await get_weekly_loot_winner_role(guild)
+    if role is None:
+        return
+
+    for member in list(role.members):
+        if keep_member_id is not None and member.id == keep_member_id:
+            continue
+        try:
+            await member.remove_roles(role, reason="Weekly Loot Winner rotation")
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            print(f"Could not remove Weekly Loot Winner role from {member}: {exc}")
+
+
+async def grant_weekly_loot_role(player: str, guild: discord.Guild):
+    role = await get_weekly_loot_winner_role(guild)
+    if role is None:
+        return False, f'Role "{WEEKLY_LOOT_WINNER_ROLE_NAME}" was not found in the server.'
+
+    discord_id = get_linked_discord_id(player)
+    if discord_id is None:
+        return False, f"No Discord ID is linked to **{player}**. Use `/showids` to link it."
+
+    member = guild.get_member(discord_id)
+    if member is None:
+        try:
+            member = await guild.fetch_member(discord_id)
+        except (discord.NotFound, discord.HTTPException):
+            return False, f"Could not find Discord member `{discord_id}` for **{player}**."
+
+    me = guild.me
+    if me is not None and role >= me.top_role:
+        return False, (
+            f'The role "{role.name}" is higher than or equal to my highest role, '
+            "so I cannot manage it."
+        )
+
+    await remove_weekly_loot_role_from_others(guild, keep_member_id=member.id)
+
+    try:
+        await member.add_roles(
+            role,
+            reason=f"Weekly Loot Winner: {player}",
+        )
+    except (discord.Forbidden, discord.HTTPException) as exc:
+        return False, f"I could not grant the role to **{player}**: `{exc}`"
+
+    return True, f"🏆 **{player}** now has the **{role.name}** role."
+
+
+@tasks.loop(hours=1)
+async def weekly_loot_role_rotation():
+    try:
+        drops_channel = bot.get_channel(DROPS_CHANNEL_ID)
+        if drops_channel is None:
+            drops_channel = await bot.fetch_channel(DROPS_CHANNEL_ID)
+
+        guild = getattr(drops_channel, "guild", None)
+        if guild is None:
+            return
+
+        winner = await get_weekly_loot_winner()
+        if not winner:
+            return
+
+        success, message = await grant_weekly_loot_role(winner, guild)
+        print(f"Weekly Loot Winner rotation: {message}")
+    except Exception as exc:
+        print(f"Weekly Loot Winner rotation error: {type(exc).__name__}: {exc}")
+
+
+@weekly_loot_role_rotation.before_loop
+async def before_weekly_loot_role_rotation():
+    await bot.wait_until_ready()
+
+
 @bot.event
 async def on_ready():
     init_db()
@@ -1412,6 +1783,9 @@ async def on_ready():
             bot.add_view(leaderboard_view)
     except Exception as e:
         print(f"Could not initialize combined leaderboard view: {e}")
+
+    if not weekly_loot_role_rotation.is_running():
+        weekly_loot_role_rotation.start()
 
     print("Bot is ready.")
 
@@ -1523,6 +1897,15 @@ async def removeplayer_command(interaction: discord.Interaction, username: str):
             tuple(keys),
         ).rowcount
 
+        # Remove Discord ID links associated with the deleted player profile.
+        deleted_discord_links = conn.execute(
+            f"""
+            DELETE FROM player_discord_links
+            WHERE player_key IN ({placeholders})
+            """,
+            tuple(keys),
+        ).rowcount
+
         # Remove aliases associated with the deleted player profile.
         deleted_aliases = conn.execute(
             f"""
@@ -1548,7 +1931,8 @@ async def removeplayer_command(interaction: discord.Interaction, username: str):
     await interaction.followup.send(
         f"✅ Removed **{username}** from the leaderboards.\n"
         f"🗑️ Deleted **{deleted_events:,}** recorded events"
-        + (f" and **{deleted_aliases:,}** linked name aliases." if deleted_aliases else "."),
+        + (f", **{deleted_aliases:,}** linked name aliases" if deleted_aliases else "")
+        + (f", and **{deleted_discord_links:,}** Discord ID link(s)." if deleted_discord_links else "."),
         ephemeral=True,
     )
 
@@ -1561,6 +1945,37 @@ async def removeplayer_error(interaction: discord.Interaction, error: app_comman
             f"❌ Remove player failed: {error}",
             ephemeral=True,
         )
+
+
+@bot.tree.command(
+    name="showids",
+    description="Open the menu to assign Discord IDs to leaderboard players.",
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def showids_command(interaction: discord.Interaction):
+    view = ShowIdsView(interaction)
+    await interaction.response.send_message(
+        embed=view.make_embed(),
+        view=view,
+        ephemeral=True,
+    )
+    view.message = await interaction.original_response()
+
+
+@showids_command.error
+async def showids_error(
+    interaction: discord.Interaction,
+    error: app_commands.AppCommandError,
+):
+    if isinstance(error, app_commands.errors.MissingPermissions):
+        message = "❌ You need **Manage Server** permission to use `/showids`."
+    else:
+        message = f"❌ `/showids` failed: {error}"
+
+    if interaction.response.is_done():
+        await interaction.followup.send(message, ephemeral=True)
+    else:
+        await interaction.response.send_message(message, ephemeral=True)
 
 
 @bot.tree.command(name="leaderboard", description="Show the current clan leaderboard.")
@@ -1596,10 +2011,25 @@ async def send_player_stats(interaction: discord.Interaction, player: str):
         color=discord.Color.blurple(),
         timestamp=datetime.now(timezone.utc),
     )
+    linked_discord_id = get_linked_discord_id(row["player"])
+
     embed.add_field(name="💰 Total Loot", value=f"**{format_gp(loot)} GP**", inline=True)
     embed.add_field(name="🎁 Loot Drops", value=f"**{drops:,}**", inline=True)
     embed.add_field(name="💀 Deaths", value=f"**{deaths:,}**", inline=True)
     embed.add_field(name="💸 PvP GP Lost", value=f"**{format_gp(death_value)} GP**", inline=True)
+
+    if linked_discord_id:
+        embed.add_field(
+            name="🔗 Discord ID",
+            value=f"<@{linked_discord_id}>\n`{linked_discord_id}`",
+            inline=False,
+        )
+    else:
+        embed.add_field(
+            name="🔗 Discord ID",
+            value="Not linked",
+            inline=False,
+        )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -1674,6 +2104,28 @@ async def namechange_command(
                 (new_name, old_key),
             )
             merged_events = cur.rowcount
+
+            # Move an existing Discord link from the old profile to the new
+            # profile so /namechange does not break role assignment.
+            old_discord = conn.execute(
+                "SELECT discord_id FROM player_discord_links WHERE player_key = ?",
+                (old_key,),
+            ).fetchone()
+            if old_discord:
+                conn.execute(
+                    """
+                    INSERT INTO player_discord_links(player_key, player_name, discord_id)
+                    VALUES(?, ?, ?)
+                    ON CONFLICT(player_key) DO UPDATE SET
+                        player_name = excluded.player_name,
+                        discord_id = excluded.discord_id
+                    """,
+                    (new_key, new_name, int(old_discord["discord_id"])),
+                )
+                conn.execute(
+                    "DELETE FROM player_discord_links WHERE player_key = ?",
+                    (old_key,),
+                )
 
             # Any aliases which ultimately pointed to the old profile should
             # now resolve directly to the new profile.
