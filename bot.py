@@ -1828,10 +1828,9 @@ def get_completed_weekly_loot_winner(week_monday):
         conn.close()
 
 
-@tasks.loop(hours=1)
-def build_weekly_winner_announcement(winner, discord_id, completed_week):
+def build_weekly_winner_announcement(winner, discord_id, completed_week, role):
     mention = f"<@{int(discord_id)}>" if discord_id is not None else f"**{winner}**"
-    role_mention = f"<@&{WEEKLY_LOOT_WINNER_ROLE_ID}>"
+    role_mention = role.mention
 
     return discord.Embed(
         title="🏆 WEEKLY LOOT WINNER",
@@ -1901,17 +1900,23 @@ async def weekly_loot_role_rotation():
 
                 discord_id = get_linked_discord_id(winner)
                 mention = f"<@{int(discord_id)}>" if discord_id is not None else f"**{winner}**"
+                winner_role = await get_weekly_loot_winner_role(guild)
+                if winner_role is None:
+                    raise RuntimeError(
+                        f'Role "{WEEKLY_LOOT_WINNER_ROLE_NAME}" was not found in the server.'
+                    )
 
                 announcement = build_weekly_winner_announcement(
                     winner,
                     discord_id,
                     completed_week,
+                    winner_role,
                 )
                 announcement.set_footer(
                     text="The new weekly loot ranking has now started."
                 )
                 await announcement_channel.send(
-                    content=f"<@{int(discord_id)}> <@&{WEEKLY_LOOT_WINNER_ROLE_ID}>",
+                    content=f"<@{int(discord_id)}> {winner_role.mention}",
                     embed=announcement,
                 )
                 print(
@@ -2046,17 +2051,25 @@ async def roletest_command(interaction: discord.Interaction, player: str):
             )
 
         mention = f"<@{int(discord_id)}>"
+        winner_role = await get_weekly_loot_winner_role(guild)
+        if winner_role is None:
+            await interaction.followup.send(
+                f'❌ Role "{WEEKLY_LOOT_WINNER_ROLE_NAME}" was not found in the server.',
+                ephemeral=True,
+            )
+            return
 
         # Use the exact same announcement embed as the real weekly rotation.
         embed = build_weekly_winner_announcement(
             player,
             discord_id,
             get_previous_completed_week_key(),
+            winner_role,
         )
         embed.set_footer(text="The new weekly loot ranking has now started.")
 
         await announcement_channel.send(
-            content=f"<@{int(discord_id)}> <@&{WEEKLY_LOOT_WINNER_ROLE_ID}>",
+            content=f"<@{int(discord_id)}> {winner_role.mention}",
             embed=embed,
         )
 
