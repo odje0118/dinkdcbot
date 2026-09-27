@@ -1983,6 +1983,7 @@ async def debugplayer_command(interaction: discord.Interaction, player: str):
 
 
 @bot.tree.command(name="removeplayer", description="Remove a player and all recorded leaderboard data.")
+@app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.describe(username="The OSRS username to remove from the leaderboards")
 async def removeplayer_command(interaction: discord.Interaction, username: str):
     """Permanently remove a player's recorded events and linked name aliases."""
@@ -2171,6 +2172,7 @@ async def send_player_stats(interaction: discord.Interaction, player: str):
 
 
 @bot.tree.command(name="namechange", description="Merge an old OSRS username into a new username.")
+@app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.describe(
     old_name="The player's previous OSRS username",
     new_name="The player's new OSRS username",
