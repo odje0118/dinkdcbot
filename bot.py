@@ -3,6 +3,7 @@ import re
 import sqlite3
 import asyncio
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
 import discord
 from discord import app_commands
@@ -17,6 +18,53 @@ DEATHS_CHANNEL_ID = 1540800494547640420
 LEADERBOARD_CHANNEL_ID = 1553383319696048208
 WEEKLY_LOOT_ANNOUNCEMENT_CHANNEL_ID = 1553886530823524424
 WEEKLY_LOOT_WINNER_ROLE_NAME = "Weekly Loot Winner"
+AMSTERDAM_TZ = ZoneInfo("Europe/Amsterdam")
+DUTCH_MONTHS = {
+    1: "januari", 2: "februari", 3: "maart", 4: "april",
+    5: "mei", 6: "juni", 7: "juli", 8: "augustus",
+    9: "september", 10: "oktober", 11: "november", 12: "december",
+}
+
+
+def amsterdam_now():
+    return datetime.now(AMSTERDAM_TZ)
+
+
+def local_week_start(dt=None):
+    """Return Monday 00:00 in Europe/Amsterdam for the given local time."""
+    dt = dt or amsterdam_now()
+    dt = dt.astimezone(AMSTERDAM_TZ)
+    return (dt - timedelta(days=dt.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+
+
+def week_bounds_utc(week_monday):
+    """Return UTC-naive ISO timestamps for a Monday-Sunday local week."""
+    monday_local = datetime.strptime(week_monday, "%Y-%m-%d").replace(
+        tzinfo=AMSTERDAM_TZ
+    )
+    next_monday_local = monday_local + timedelta(days=7)
+    return (
+        monday_local.astimezone(timezone.utc).replace(tzinfo=None).isoformat(sep=" "),
+        next_monday_local.astimezone(timezone.utc).replace(tzinfo=None).isoformat(sep=" "),
+    )
+
+
+def format_dutch_date(date_string):
+    date_obj = datetime.strptime(date_string, "%Y-%m-%d")
+    return f"{date_obj.day} {DUTCH_MONTHS[date_obj.month]} {date_obj.year}"
+
+
+def format_dutch_week_range(week_monday):
+    start = datetime.strptime(week_monday, "%Y-%m-%d")
+    end = start + timedelta(days=6)
+    return (
+        f"{start.day} {DUTCH_MONTHS[start.month]} {start.year} "
+        f"t/m {end.day} {DUTCH_MONTHS[end.month]} {end.year}"
+    )
+
+
 
 DB_FILE = os.getenv("DB_FILE", "leaderboard.db")
 
@@ -522,13 +570,12 @@ def add_chunked_field(embed: discord.Embed, field_name: str, lines):
 
 
 def weekly_reset_countdown():
-    """Return a countdown to the next Monday 00:00 in the bot's local time."""
-    now = datetime.now()
+    """Return a countdown to the next Monday 00:00 in Europe/Amsterdam."""
+    now = amsterdam_now()
     days_until_monday = (7 - now.weekday()) % 7
     next_monday = (now + timedelta(days=days_until_monday)).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
-
     if next_monday <= now:
         next_monday += timedelta(days=7)
 
@@ -538,17 +585,18 @@ def weekly_reset_countdown():
     hours, remainder = divmod(remainder, 3600)
     minutes, _ = divmod(remainder, 60)
 
-    return f"{days}d {hours}h {minutes}m"
+    return f"{days}d {hours:02d}u {minutes:02d}m"
 
 
 def get_weekly_loot_stats(limit=15):
-    """Return the current Monday-Sunday weekly ranking.
+    """Return the current Monday-Sunday weekly ranking in Dutch local time.
 
-    ONLY this weekly ranking combines multiple OSRS accounts that are linked
-    to the same Discord ID. All other leaderboards continue to use OSRS names.
-    Linked players are displayed as Discord mentions; unlinked players remain shown
-    by their OSRS name.
+    ONLY this weekly ranking combines multiple OSRS accounts linked to the same
+    Discord ID. All other leaderboards continue to use OSRS names.
     """
+    current_monday = local_week_start().strftime("%Y-%m-%d")
+    start_utc, end_utc = week_bounds_utc(current_monday)
+
     conn = db()
     rows = conn.execute(
         """
@@ -570,8 +618,8 @@ def get_weekly_loot_stats(limit=15):
             LEFT JOIN player_discord_links pdl
                 ON pdl.player_key = LOWER(REPLACE(e.player, ' ', ''))
             WHERE e.event_type='loot'
-              AND datetime(e.created_at) >= datetime('now', 'localtime', 'weekday 1', '-7 days')
-              AND datetime(e.created_at) < datetime('now', 'localtime', 'weekday 1')
+              AND datetime(e.created_at) >= datetime(?)
+              AND datetime(e.created_at) < datetime(?)
             GROUP BY ranking_key, display_name
         )
         SELECT display_name AS player, loot_gp, loot_drops
@@ -579,7 +627,7 @@ def get_weekly_loot_stats(limit=15):
         ORDER BY loot_gp DESC, display_name COLLATE NOCASE
         LIMIT ?
         """,
-        (limit,),
+        (start_utc, end_utc, limit),
     ).fetchall()
     conn.close()
     return rows
@@ -1745,10 +1793,8 @@ WEEKLY_WINNER_LAST_AWARDED_KEY = "weekly_winner_last_awarded_week"
 
 
 def get_previous_completed_week_key():
-    """Return the Monday date for the most recently completed Monday-Sunday week."""
-    now = datetime.now()
-    this_monday = now - timedelta(days=now.weekday())
-    this_monday = this_monday.replace(hour=0, minute=0, second=0, microsecond=0)
+    """Return the Monday date for the most recently completed local Dutch week."""
+    this_monday = local_week_start()
     previous_monday = this_monday - timedelta(days=7)
     return previous_monday.strftime("%Y-%m-%d")
 
@@ -1782,7 +1828,9 @@ def set_last_awarded_week(week_key):
 
 
 def get_completed_weekly_loot_winner(week_monday):
-    """Return the winner of the completed Monday-Sunday week."""
+    """Return the winner of the completed Monday-Sunday local Dutch week."""
+    start_utc, end_utc = week_bounds_utc(week_monday)
+
     conn = db()
     try:
         row = conn.execute(
@@ -1793,8 +1841,8 @@ def get_completed_weekly_loot_winner(week_monday):
                     SUM(value_gp) AS loot_gp
                 FROM events
                 WHERE event_type='loot'
-                  AND datetime(created_at) >= datetime(?, '00:00:00')
-                  AND datetime(created_at) < datetime(?, '+7 days', '00:00:00')
+                  AND datetime(created_at) >= datetime(?)
+                  AND datetime(created_at) < datetime(?)
                 GROUP BY pkey
             ),
             latest_names AS (
@@ -1809,8 +1857,8 @@ def get_completed_weekly_loot_winner(week_monday):
                       WHERE e2.event_type='loot'
                         AND LOWER(REPLACE(e2.player, ' ', '')) =
                             LOWER(REPLACE(e.player, ' ', ''))
-                        AND datetime(e2.created_at) >= datetime(?, '00:00:00')
-                        AND datetime(e2.created_at) < datetime(?, '+7 days', '00:00:00')
+                        AND datetime(e2.created_at) >= datetime(?)
+                        AND datetime(e2.created_at) < datetime(?)
                       ORDER BY datetime(e2.created_at) DESC, e2.message_id DESC
                       LIMIT 1
                   )
@@ -1821,7 +1869,7 @@ def get_completed_weekly_loot_winner(week_monday):
             ORDER BY g.loot_gp DESC, n.display_name COLLATE NOCASE
             LIMIT 1
             """,
-            (week_monday, week_monday, week_monday, week_monday),
+            (start_utc, end_utc, start_utc, end_utc),
         ).fetchone()
         return row["player"] if row else None
     finally:
@@ -1837,7 +1885,7 @@ def build_weekly_winner_announcement(winner, discord_id, completed_week, role):
         description=(
             f"Congratulations {mention}!\n\n"
             f"You finished **#1** in the weekly loot ranking "
-            f"for the completed week starting **{completed_week}**.\n\n"
+            f"voor de voltooide week **{format_dutch_week_range(completed_week)}**.\n\n"
             f"🎖️ The {role_mention} role has been granted to you!"
         ),
         color=discord.Color.gold(),
