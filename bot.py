@@ -1853,7 +1853,7 @@ def get_completed_weekly_winner_drops(winner, completed_week, discord_id=None):
         if discord_id is not None:
             rows = conn.execute(
                 """
-                SELECT e.player, e.value_gp, e.loot_item, e.source, e.created_at
+                SELECT e.player, e.value_gp, e.loot_item, e.source, e.created_at, e.channel_id, e.message_id
                 FROM events e
                 JOIN player_discord_links pdl
                   ON pdl.player_key = LOWER(REPLACE(e.player, ' ', ''))
@@ -1868,7 +1868,7 @@ def get_completed_weekly_winner_drops(winner, completed_week, discord_id=None):
         else:
             rows = conn.execute(
                 """
-                SELECT player, value_gp, loot_item, source, created_at
+                SELECT player, value_gp, loot_item, source, created_at, channel_id, message_id
                 FROM events
                 WHERE event_type='loot'
                   AND LOWER(REPLACE(player, ' ', '')) =
