@@ -1371,6 +1371,12 @@ async def on_ready():
 
         guild = getattr(drops_channel, "guild", None)
         if guild is not None:
+            # Global commands are not automatically included in a guild sync.
+            # Copy the global command tree into this guild first, then sync it.
+            # This makes newly added commands such as /removeplayer appear
+            # immediately after a restart instead of waiting for global
+            # command propagation.
+            bot.tree.copy_global_to(guild=guild)
             guild_synced = await bot.tree.sync(guild=guild)
             print(
                 f"Synced {len(guild_synced)} guild slash commands "
