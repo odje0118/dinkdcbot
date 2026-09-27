@@ -322,6 +322,7 @@ def parse_death(message: discord.Message):
 
 
 async def save_event(message: discord.Message, parsed: dict) -> bool:
+    """Insert a Dink event or repair an existing event."""
     async with db_lock:
         conn = db()
         cur = conn.execute(
@@ -331,49 +332,34 @@ async def save_event(message: discord.Message, parsed: dict) -> bool:
              completion_count, source, loot_item, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (
-                message.id,
-                message.channel.id,
-                parsed["event_type"],
-                parsed["player"],
-                parsed["value_gp"],
-                parsed["completion_count"],
-                parsed["source"],
-                parsed.get("loot_item", ""),
-                message.created_at.isoformat(),
-            ),
+            (message.id, message.channel.id, parsed["event_type"],
+             parsed["player"], parsed["value_gp"],
+             parsed["completion_count"], parsed.get("source", ""),
+             parsed.get("loot_item", ""), message.created_at.isoformat()),
         )
         inserted = cur.rowcount == 1
+        changed = False
 
-        # Repair drops that were imported before source parsing was fixed.
-        if not inserted and parsed["event_type"] == "loot":
-            updates = []
-            params = []
+        if not inserted:
+            # Re-process the complete parsed event. This repairs older rows and
+            # also handles Dink notifications that were edited after posting.
+            cur = conn.execute(
+                """
+                UPDATE events
+                SET player = ?, value_gp = ?, completion_count = ?,
+                    source = ?, loot_item = ?
+                WHERE message_id = ? AND channel_id = ? AND event_type = ?
+                """,
+                (parsed["player"], parsed["value_gp"],
+                 parsed["completion_count"], parsed.get("source", ""),
+                 parsed.get("loot_item", ""), message.id,
+                 message.channel.id, parsed["event_type"]),
+            )
+            changed = cur.rowcount > 0
 
-            if parsed.get("source"):
-                updates.append("source = ?")
-                params.append(parsed["source"])
-
-            if parsed.get("loot_item"):
-                updates.append("loot_item = ?")
-                params.append(parsed["loot_item"])
-
-            if updates:
-                params.extend([message.id, message.channel.id])
-                conn.execute(
-                    f"""
-                    UPDATE events
-                    SET {", ".join(updates)}
-                    WHERE message_id = ?
-                      AND channel_id = ?
-                      AND event_type = 'loot'
-                    """,
-                    params,
-                )
-                conn.commit()
-
+        conn.commit()
         conn.close()
-    return inserted
+    return inserted or changed
 
 
 async def process_message(message: discord.Message) -> bool:
@@ -969,17 +955,12 @@ async def backfill_channel(channel_id: int):
     if channel is None:
         channel = await bot.fetch_channel(channel_id)
 
-    imported = 0
+    processed = 0
     async for message in channel.history(limit=None, oldest_first=True):
-        if message.webhook_id is None:
-            # Dink posts should normally be webhooks. We still parse it
-            # because some setups may relay messages through an app bot.
-            pass
-
         if await process_message(message):
-            imported += 1
+            processed += 1
 
-    return imported
+    return processed
 
 
 @bot.event
@@ -1018,6 +999,51 @@ async def on_message(message: discord.Message):
             await update_leaderboard()
 
     await bot.process_commands(message)
+
+
+@bot.event
+async def on_message_edit(before: discord.Message, after: discord.Message):
+    """Re-process edited Dink notifications."""
+    if after.author == bot.user:
+        return
+    if after.channel.id in (DROPS_CHANNEL_ID, DEATHS_CHANNEL_ID):
+        if await process_message(after):
+            await update_leaderboard()
+
+
+@bot.tree.command(name="debugplayer", description="Debug stored Dink events for a player.")
+@app_commands.describe(player="The exact player name to inspect")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def debugplayer_command(interaction: discord.Interaction, player: str):
+    conn = db()
+    rows = conn.execute(
+        """
+        SELECT message_id, event_type, player, value_gp, source, loot_item, created_at
+        FROM events
+        WHERE LOWER(REPLACE(player, ' ', '')) = LOWER(REPLACE(?, ' ', ''))
+        ORDER BY datetime(created_at) DESC, message_id DESC
+        LIMIT 25
+        """,
+        (player,),
+    ).fetchall()
+    conn.close()
+    if not rows:
+        await interaction.response.send_message(f"No stored events found for **{player}**.", ephemeral=True)
+        return
+    total_loot = sum(r["value_gp"] or 0 for r in rows if r["event_type"] == "loot")
+    loot_count = sum(1 for r in rows if r["event_type"] == "loot")
+    deaths = sum(1 for r in rows if r["event_type"] == "death")
+    death_gp = sum(r["value_gp"] or 0 for r in rows if r["event_type"] == "death")
+    lines = []
+    for r in rows[:15]:
+        kind = "💰" if r["event_type"] == "loot" else "💀"
+        extra = r["loot_item"] or r["source"] or "no item/source"
+        lines.append(f"{kind} **{format_gp(r['value_gp'] or 0)} GP** — {extra}")
+    embed = discord.Embed(title=f"🔎 DEBUG — {player}", description=(
+        f"**Stored loot:** {loot_count} • **{format_gp(total_loot)} GP**\n"
+        f"**Stored deaths:** {deaths} • **{format_gp(death_gp)} GP lost**\n\n" + "\n".join(lines)
+    ), color=discord.Color.orange())
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="leaderboard", description="Show the current clan leaderboard.")
@@ -1150,8 +1176,8 @@ async def backfill_command(interaction: discord.Interaction):
 
     await interaction.followup.send(
         f"Backfill complete.\n"
-        f"💰 Imported {drops} new loot events.\n"
-        f"💀 Imported {deaths} new death events.\n"
+        f"💰 Processed {drops} loot events.\n"
+        f"💀 Processed {deaths} death events.\n"
         f"{leaderboard_status}",
         ephemeral=True,
     )
