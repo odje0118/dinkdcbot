@@ -1138,7 +1138,7 @@ async def update_leaderboard():
             total_drops = sum(r["loot_drops"] or 0 for r in loot_rows)
 
             loot_embed.add_field(
-                name="📊 CLAN TOTALS",
+                name="📊 GROUP TOTALS",
                 value=(
                     f"💰 **{format_gp(total_loot)} GP** total loot   •   "
                     f"🎁 **{total_drops:,}** drops"
@@ -1231,7 +1231,7 @@ async def update_leaderboard():
             total_deaths = sum(r["deaths"] or 0 for r in death_rows)
             total_loss = sum(r["death_value_gp"] or 0 for r in death_rows)
             death_embed.add_field(
-                name="📊 CLAN TOTALS",
+                name="📊 GROUP TOTALS",
                 value=(
                     f"💀 **{total_deaths:,}** deaths   •   "
                     f"💸 **{format_gp(total_loss)} GP** lost in PvP"
