@@ -2905,6 +2905,45 @@ def _next_milestone(current: int, milestones):
     return None
 
 
+class PlayerProfileDropsButton(discord.ui.Button):
+    def __init__(self, player: str):
+        super().__init__(
+            label="Show All Drops",
+            emoji="💎",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"profile_show_all_drops:{player[:70]}",
+        )
+        self.player = player
+
+    async def callback(self, interaction: discord.Interaction):
+        _log_interaction_readable(interaction, "Profile Show All Drops", player=self.player)
+        rows = get_player_loot_events(self.player)
+
+        if not rows:
+            await interaction.response.send_message(
+                f"No recorded drops found for **{self.player}**.",
+                ephemeral=True,
+            )
+            return
+
+        view = PlayerDropsPages(
+            player=self.player,
+            rows=rows,
+            owner_id=interaction.user.id,
+        )
+        await interaction.response.send_message(
+            embed=view.build_embed(),
+            view=view,
+            ephemeral=True,
+        )
+
+
+class PlayerProfileView(discord.ui.View):
+    def __init__(self, player: str):
+        super().__init__(timeout=300)
+        self.add_item(PlayerProfileDropsButton(player))
+
+
 async def send_player_stats(interaction: discord.Interaction, player: str):
     row = get_player_stats(player)
 
@@ -3023,7 +3062,11 @@ async def send_player_stats(interaction: discord.Interaction, player: str):
 
     embed.set_footer(text="Personal Dink statistics")
 
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.response.send_message(
+        embed=embed,
+        view=PlayerProfileView(player_name),
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(name="namechange", description="Merge an old OSRS username into a new username.")
