@@ -2896,12 +2896,15 @@ class ProfileCloseButton(discord.ui.Button):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.edit_message(
-            content=None,
-            embed=None,
-            view=None,
-            attachments=[],
-        )
+        _log_interaction_readable(interaction, "Close Profile")
+        self.view.stop()
+        await interaction.response.defer()
+        try:
+            await interaction.delete_original_response()
+        except (discord.NotFound, discord.HTTPException):
+            # If Discord has already removed the ephemeral response,
+            # there is nothing left to delete.
+            pass
 
 
 class PlayerProfileDropsButton(discord.ui.Button):
