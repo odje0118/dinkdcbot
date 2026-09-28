@@ -1637,7 +1637,7 @@ async def update_leaderboard():
                 "━━━━━━━━━━━━━━━━━━━━\n"
                 "**TOTAL LOOT RANKING**\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
-                "Total loot accumulated per OSRS player across all recorded Dink drops.\n\n"
+                "Total loot earned by each OSRS player from all recorded Dink drops.\n\n"
                 "⚠️ Only Dink drops of **500K GP+** are recorded."
             ),
             color=discord.Color.green(),
@@ -1833,8 +1833,7 @@ async def update_leaderboard():
         else:
             activity_embed.description = "No loot drops have been imported yet."
 
-        updated_timestamp = int(datetime.now(timezone.utc).timestamp())
-        updated_footer = f"🔄 Updated <t:{updated_timestamp}:R>"
+        updated_footer = f"🔄 Updated {relative_updated_text()}"
 
         for embed in (loot_embed, death_embed, biggest_embed, activity_embed):
             embed.set_footer(text=updated_footer)
@@ -3044,6 +3043,30 @@ def _next_milestone(current: int, milestones):
     return None
 
 
+
+def relative_updated_text(updated_at=None):
+    """Return a compact human-readable relative update time for an embed footer."""
+    updated_at = updated_at or datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
+    seconds = max(0, int((now - updated_at).total_seconds()))
+
+    if seconds < 10:
+        return "just now"
+    if seconds < 60:
+        return f"{seconds} seconds ago"
+
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+
+    days = hours // 24
+    return f"{days} day{'s' if days != 1 else ''} ago"
+
+
 def get_player_weekly_card_stats(player: str):
     """
     Return the current week's personal stats.
@@ -3260,9 +3283,7 @@ def build_player_weekly_embed(player: str):
         color=discord.Color.gold(),
         timestamp=datetime.now(timezone.utc),
     )
-    embed.set_footer(
-        text=f"🔄 Updated <t:{int(datetime.now(timezone.utc).timestamp())}:R>"
-    )
+    embed.set_footer(text=f"🔄 Updated {relative_updated_text()}")
     return embed
 
 
@@ -3319,31 +3340,9 @@ class PlayerProfileDropsButton(discord.ui.Button):
         )
 
 
-class PlayerProfileWeeklyButton(discord.ui.Button):
-    def __init__(self, player: str):
-        super().__init__(
-            label="This Week",
-            emoji="📅",
-            style=discord.ButtonStyle.secondary,
-        )
-        self.player = player
-
-    async def callback(self, interaction: discord.Interaction):
-        _log_interaction_readable(
-            interaction,
-            "Profile This Week",
-            player=self.player,
-        )
-        await interaction.response.edit_message(
-            embed=build_player_weekly_embed(self.player),
-            view=PlayerWeeklyView(self.player, interaction.user.id),
-        )
-
-
 class PlayerProfileView(discord.ui.View):
     def __init__(self, player: str):
         super().__init__(timeout=300)
-        self.add_item(PlayerProfileWeeklyButton(player))
         self.add_item(PlayerProfileDropsButton(player))
         self.add_item(ProfileCloseButton())
 
