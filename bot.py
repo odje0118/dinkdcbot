@@ -32,7 +32,7 @@ LOOT_MILESTONES = [
 ]
 
 PVP_KILL_MILESTONES = [1, 5, 10, 25, 50, 100, 250, 500, 1_000]
-BIG_DROP_ANNOUNCEMENT_MIN_GP = 20_000_000
+BIG_DROP_ANNOUNCEMENT_MIN_GP = 10_000_000
 
 DB_FILE = os.getenv("DB_FILE", "leaderboard.db")
 
@@ -657,15 +657,19 @@ async def send_milestone_announcement(
             print(f"ERROR: Could not access milestone announcement channel: {exc}")
             return
 
+    discord_id = get_linked_discord_id(player)
+    mention = f"<@{discord_id}>" if discord_id is not None else None
+
+    if mention:
+        description = f"{description}\n\n{mention}"
+
     embed = discord.Embed(
         title=title,
         description=description,
         color=color,
         timestamp=datetime.now(timezone.utc),
     )
-    discord_id = get_linked_discord_id(player)
-    mention = f"<@{discord_id}>" if discord_id is not None else None
-    await channel.send(content=mention, embed=embed)
+    await channel.send(embed=embed)
 
 
 def build_show_drop_url(message: discord.Message) -> str:
@@ -728,7 +732,8 @@ async def process_milestone_announcements(
                     description=(
                         f"**{player}** just received **{item}** worth "
                         f"**{format_gp(value_gp)} GP**! 🎉\n\n"
-                        f"[Show Drop]({drop_url})"
+                        f"[Show Drop]({drop_url})\n\n"
+                        f"{mention or ''}"
                     ),
                     color=discord.Color.purple(),
                     timestamp=datetime.now(timezone.utc),
@@ -744,7 +749,11 @@ async def process_milestone_announcements(
                         return
                 discord_id = get_linked_discord_id(player)
                 mention = f"<@{discord_id}>" if discord_id is not None else None
-                await channel.send(content=mention, embed=embed)
+
+                embed.description = (
+                    f"{embed.description}\n\n{mention or ''}"
+                )
+                await channel.send(embed=embed)
 
     elif event_type == "pvp_kill":
         kills = get_player_pvp_kills(player)
@@ -2555,7 +2564,8 @@ async def announcetest_command(
         description = (
             f"**{player}** just received **{item}** worth "
             f"**{format_gp(value_gp)} GP**! 🎉\n\n"
-            f"[Show Drop]({drop_url})"
+            f"[Show Drop]({drop_url})\n\n"
+            f"{mention or ''}"
         )
         color = discord.Color.purple()
 
@@ -2577,7 +2587,7 @@ async def announcetest_command(
             )
             return
 
-    await channel.send(content=mention, embed=embed)
+    await channel.send(embed=embed)
 
     if mention:
         await interaction.followup.send(
