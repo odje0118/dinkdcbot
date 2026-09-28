@@ -1986,25 +1986,39 @@ async def remove_weekly_loot_role_from_others(
     if role is None:
         return
 
-    # role.members can be incomplete when the member cache has not been
-    # populated. Fetch the guild members from Discord so role rotation also
-    # works reliably from /roletest and after a bot restart.
-    members_with_role = {}
+    # Do NOT use guild.fetch_members() here. That requires the privileged
+    # Server Members Intent. Instead, fetch only the Discord IDs that are
+    # already linked to leaderboard players. This works without Members Intent
+    # and lets us reliably find the previous role holder after a restart.
+    conn = db()
+    rows = conn.execute(
+        "SELECT DISTINCT discord_id FROM player_discord_links"
+    ).fetchall()
+    conn.close()
 
+    candidate_ids = {
+        int(row["discord_id"])
+        for row in rows
+        if row["discord_id"] is not None
+    }
+
+    # Include cached role members too, in case a member is cached but not
+    # currently represented in the links table.
     for member in list(role.members):
-        members_with_role[member.id] = member
+        candidate_ids.add(member.id)
 
-    try:
-        async for member in guild.fetch_members(limit=None):
-            if role in member.roles:
-                members_with_role[member.id] = member
-    except (discord.Forbidden, discord.HTTPException) as exc:
-        print(f"Could not fetch guild members for role cleanup: {exc}")
-
-    for member in members_with_role.values():
-        if keep_member_id is not None and member.id == keep_member_id:
+    for member_id in candidate_ids:
+        if keep_member_id is not None and member_id == keep_member_id:
             continue
+
         try:
+            member = guild.get_member(member_id)
+            if member is None:
+                member = await guild.fetch_member(member_id)
+
+            if role not in member.roles:
+                continue
+
             await member.remove_roles(
                 role,
                 reason="Weekly Loot Winner rotation",
@@ -2013,10 +2027,13 @@ async def remove_weekly_loot_role_from_others(
                 f"Removed Weekly Loot Winner role from {member} "
                 f"({member.id})"
             )
+        except discord.NotFound:
+            # The linked Discord account is no longer in this server.
+            continue
         except (discord.Forbidden, discord.HTTPException) as exc:
             print(
                 f"Could not remove Weekly Loot Winner role from "
-                f"{member} ({member.id}): {exc}"
+                f"{member_id}: {exc}"
             )
 
 
