@@ -3116,12 +3116,6 @@ async def refreshnames_error(interaction: discord.Interaction, error: app_comman
         print(f"Refresh names command error: {error}")
 
 
-@bot.tree.command(name="stats", description="Show stats for a player.")
-@app_commands.describe(player="The exact player name")
-async def stats_command(interaction: discord.Interaction, player: str):
-    await send_player_stats(interaction, player)
-
-
 @bot.tree.command(name="player", description="Show detailed stats for a player.")
 @app_commands.describe(player="The exact player name")
 async def player_command(interaction: discord.Interaction, player: str):
