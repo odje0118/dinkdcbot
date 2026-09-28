@@ -1266,7 +1266,7 @@ class PlayerDropsPages(discord.ui.View):
 class ShowAllDropsSelect(discord.ui.Select):
     def __init__(self, options):
         super().__init__(
-            placeholder="Choose a player to show all drops...",
+            placeholder="Choose a player to show profile...",
             min_values=1,
             max_values=1,
             options=options,
