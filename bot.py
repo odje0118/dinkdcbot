@@ -2889,43 +2889,130 @@ def get_linked_player_accounts(discord_id: int):
         conn.close()
 
 
+def _progress_bar(current: int, target: int, segments: int = 12) -> str:
+    """Create a compact Discord-friendly progress bar."""
+    if target <= 0:
+        return "████████████"
+    ratio = max(0.0, min(1.0, current / target))
+    filled = int(ratio * segments)
+    return "█" * filled + "░" * (segments - filled)
+
+
+def _next_milestone(current: int, milestones):
+    for threshold in milestones:
+        if current < threshold:
+            return threshold
+    return None
+
+
 async def send_player_stats(interaction: discord.Interaction, player: str):
     row = get_player_stats(player)
 
-    if not row or not row['player']:
+    if not row or not row["player"]:
         await interaction.response.send_message(
             f"No data found for **{player}**.",
             ephemeral=True,
         )
         return
 
-    loot = row["loot_gp"] or 0
-    drops = row["loot_drops"] or 0
-    deaths = row["deaths"] or 0
-    death_value = row["death_value_gp"] or 0
-    completion_rows = get_player_completions(row["player"])
+    player_name = row["player"]
+    loot = int(row["loot_gp"] or 0)
+    drops = int(row["loot_drops"] or 0)
+    deaths = int(row["deaths"] or 0)
+    death_value = int(row["death_value_gp"] or 0)
+    pvp_kills = get_player_pvp_kills(player_name)
+    weekly_wins = get_weekly_loot_win_count(player_name)
+
+    # Preserve the existing completion calculation.
+    completion_rows = get_player_completions(player_name)
     completions = sum(r["completions"] or 0 for r in completion_rows)
 
+    linked_discord_id = get_linked_discord_id(player_name)
+
+    # Progress toward the next lifetime loot milestone.
+    next_loot = _next_milestone(loot, LOOT_MILESTONES)
+    if next_loot is None:
+        loot_progress = (
+            "████████████ **MAX**\n"
+            f"**{format_gp(loot)} GP** • All loot milestones completed"
+        )
+    else:
+        previous_loot = 0
+        for threshold in LOOT_MILESTONES:
+            if loot < threshold:
+                break
+            previous_loot = threshold
+
+        loot_progress = (
+            f"`{_progress_bar(loot - previous_loot, next_loot - previous_loot)}`\n"
+            f"**{format_gp(loot)} / {format_gp(next_loot)} GP** "
+            f"• Next milestone: **{format_gp(next_loot)} GP**"
+        )
+
+    # Progress toward the next lifetime PvP milestone.
+    next_pvp = _next_milestone(pvp_kills, PVP_KILL_MILESTONES)
+    if next_pvp is None:
+        pvp_progress = (
+            "████████████ **MAX**\n"
+            f"**{pvp_kills:,} kills** • All PvP milestones completed"
+        )
+    else:
+        previous_pvp = 0
+        for threshold in PVP_KILL_MILESTONES:
+            if pvp_kills < threshold:
+                break
+            previous_pvp = threshold
+
+        pvp_progress = (
+            f"`{_progress_bar(pvp_kills - previous_pvp, next_pvp - previous_pvp)}`\n"
+            f"**{pvp_kills:,} / {next_pvp:,} kills** "
+            f"• Next milestone: **{next_pvp:,} kills**"
+        )
+
     embed = discord.Embed(
-        title=f"📊 {row['player']}",
-        description="Personal Dink statistics",
+        title=f"👤 {player_name}",
+        description="**PLAYER PROFILE**\n━━━━━━━━━━━━━━━━━━━━",
         color=discord.Color.blurple(),
         timestamp=datetime.now(timezone.utc),
     )
-    linked_discord_id = get_linked_discord_id(row["player"])
-    weekly_wins = get_weekly_loot_win_count(row["player"])
 
-    embed.add_field(name="💰 Total Loot", value=f"**{format_gp(loot)} GP**", inline=True)
-    embed.add_field(name="🏆 Weekly Loot Wins", value=f"**{weekly_wins}**", inline=True)
-    embed.add_field(name="🎁 Loot Drops", value=f"**{drops:,}**", inline=True)
-    embed.add_field(name="💀 Deaths", value=f"**{deaths:,}**", inline=True)
-    embed.add_field(name="💸 PvP GP Lost", value=f"**{format_gp(death_value)} GP**", inline=True)
+    embed.add_field(
+        name="💰 LOOT PROGRESS",
+        value=loot_progress,
+        inline=False,
+    )
+
+    embed.add_field(
+        name="⚔️ PVP PROGRESS",
+        value=pvp_progress,
+        inline=False,
+    )
+
+    embed.add_field(
+        name="📊 STATISTICS",
+        value=(
+            f"💰 **Total Loot:** {format_gp(loot)} GP\n"
+            f"🎁 **Loot Drops:** {drops:,}\n"
+            f"💀 **Deaths:** {deaths:,}\n"
+            f"💸 **PvP GP Lost:** {format_gp(death_value)} GP\n"
+            f"⚔️ **PvP Kills:** {pvp_kills:,}\n"
+            f"🏆 **Weekly Loot Wins:** {weekly_wins:,}"
+        ),
+        inline=False,
+    )
+
+    if completions:
+        embed.add_field(
+            name="🏁 COMPLETIONS",
+            value=f"**{completions:,}**",
+            inline=True,
+        )
 
     if linked_discord_id:
         embed.add_field(
-            name="🔗 Discord ID",
-            value=f"<@{linked_discord_id}>\n`{linked_discord_id}`",
-            inline=False,
+            name="🔗 DISCORD",
+            value=f"<@{linked_discord_id}>",
+            inline=True,
         )
 
         linked_accounts = get_linked_player_accounts(int(linked_discord_id))
@@ -2934,18 +3021,20 @@ async def send_player_stats(interaction: discord.Interaction, player: str):
                 f"• **{account}**" for account in linked_accounts
             )
             embed.add_field(
-                name="👤 Linked OSRS Accounts",
+                name="👥 LINKED OSRS ACCOUNTS",
                 value=accounts_text,
                 inline=False,
             )
     else:
         embed.add_field(
-            name="🔗 Discord ID",
+            name="🔗 DISCORD",
             value="Not linked",
-            inline=False,
+            inline=True,
         )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    embed.set_footer(text="Personal Dink statistics")
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="namechange", description="Merge an old OSRS username into a new username.")
