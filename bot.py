@@ -2886,6 +2886,23 @@ def _next_milestone(current: int, milestones):
     return None
 
 
+class ProfileCloseButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(
+            label="Close",
+            emoji="✖️",
+            style=discord.ButtonStyle.danger,
+            custom_id="profile_close",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(
+            content="Profile closed.",
+            embed=None,
+            view=None,
+        )
+
+
 class PlayerProfileDropsButton(discord.ui.Button):
     def __init__(self, player: str):
         super().__init__(
@@ -2923,6 +2940,7 @@ class PlayerProfileView(discord.ui.View):
     def __init__(self, player: str):
         super().__init__(timeout=300)
         self.add_item(PlayerProfileDropsButton(player))
+        self.add_item(ProfileCloseButton())
 
 
 async def send_player_stats(interaction: discord.Interaction, player: str):
