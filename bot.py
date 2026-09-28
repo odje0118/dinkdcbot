@@ -1834,7 +1834,7 @@ async def update_leaderboard():
             activity_embed.description = "No loot drops have been imported yet."
 
         updated_timestamp = int(datetime.now(timezone.utc).timestamp())
-        updated_footer = f"🔄 Updated <t:{updated_timestamp}:R>"
+        updated_footer = f"🔄 Updated"
 
         for embed in (loot_embed, death_embed, biggest_embed, activity_embed):
             embed.set_footer(text=updated_footer)
