@@ -18,6 +18,22 @@ LEADERBOARD_CHANNEL_ID = 1553383319696048208
 WEEKLY_LOOT_ANNOUNCEMENT_CHANNEL_ID = 1553886530823524424
 WEEKLY_LOOT_WINNER_ROLE_NAME = "Weekly Loot Winner"
 
+LOOT_MILESTONES = [
+    10_000_000,
+    25_000_000,
+    50_000_000,
+    100_000_000,
+    250_000_000,
+    500_000_000,
+    1_000_000_000,
+    2_500_000_000,
+    5_000_000_000,
+    10_000_000_000,
+]
+
+PVP_KILL_MILESTONES = [1, 5, 10, 25, 50, 100, 250, 500, 1_000]
+BIG_DROP_ANNOUNCEMENT_MIN_GP = 20_000_000
+
 DB_FILE = os.getenv("DB_FILE", "leaderboard.db")
 
 intents = discord.Intents.default()
@@ -100,6 +116,14 @@ def init_db():
             player_key TEXT PRIMARY KEY,
             player_name TEXT NOT NULL,
             discord_id INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS milestone_announcements (
+            player_key TEXT NOT NULL,
+            milestone_type TEXT NOT NULL,
+            threshold INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (player_key, milestone_type, threshold)
         );
     """)
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(events)").fetchall()}
@@ -269,6 +293,52 @@ def parse_loot_item(embed: discord.Embed) -> str:
 
     return ""
 
+
+
+def parse_pvp_kill(message: discord.Message):
+    """Parse Dink Player Kill notifications posted in the drops channel."""
+    if not message.embeds:
+        return None
+
+    embed = message.embeds[0]
+    text = get_embed_text(embed)
+    if "Player Kill" not in text:
+        return None
+
+    description = (embed.description or "").strip()
+    player = None
+
+    # Common Dink wording: "Player has ... killed/gePK'd ..."
+    if description:
+        first_line = next((x.strip() for x in description.splitlines() if x.strip()), "")
+        m = re.match(
+            r"^(.+?)\s+(?:has|heeft|left|killed|PK'd|gePK'd)\b",
+            first_line,
+            re.I,
+        )
+        if m:
+            player = m.group(1).strip()
+
+        # Fallback for wording where the killer is followed by "gePK'd".
+        if not player:
+            m = re.match(r"^(.+?)\s+.*?\bgePK'd\b", first_line, re.I)
+            if m:
+                player = m.group(1).strip()
+
+    if not player and embed.author and embed.author.name:
+        player = embed.author.name.strip()
+
+    if not player:
+        return None
+
+    return {
+        "event_type": "pvp_kill",
+        "player": player,
+        "value_gp": 0,
+        "completion_count": 0,
+        "source": "Player Kill",
+        "loot_item": "",
+    }
 
 
 def parse_loot(message: discord.Message):
@@ -479,7 +549,9 @@ async def save_event(message: discord.Message, parsed: dict) -> bool:
 
 async def process_message(message: discord.Message) -> bool:
     if message.channel.id == DROPS_CHANNEL_ID:
-        parsed = parse_loot(message)
+        parsed = parse_pvp_kill(message)
+        if not parsed:
+            parsed = parse_loot(message)
     elif message.channel.id == DEATHS_CHANNEL_ID:
         parsed = parse_death(message)
     else:
@@ -488,7 +560,212 @@ async def process_message(message: discord.Message) -> bool:
     if not parsed:
         return False
 
-    return await save_event(message, parsed)
+    player = resolve_player_alias(parsed["player"])
+
+    # Capture the totals before saving so only milestones actually crossed by
+    # this event are announced. Existing historical totals will not cause a
+    # flood of old milestone announcements after this feature is deployed.
+    previous_loot_total = (
+        get_player_loot_total(player)
+        if parsed["event_type"] == "loot"
+        else None
+    )
+    previous_pvp_kills = (
+        get_player_pvp_kills(player)
+        if parsed["event_type"] == "pvp_kill"
+        else None
+    )
+
+    changed = await save_event(message, parsed)
+
+    if changed:
+        await process_milestone_announcements(
+            message,
+            parsed,
+            previous_loot_total=previous_loot_total,
+            previous_pvp_kills=previous_pvp_kills,
+        )
+
+    return changed
+
+
+def get_player_loot_total(player: str) -> int:
+    conn = db()
+    try:
+        row = conn.execute(
+            """SELECT COALESCE(SUM(value_gp), 0) AS total
+               FROM events
+               WHERE event_type='loot'
+                 AND LOWER(REPLACE(player, ' ', '')) =
+                     LOWER(REPLACE(?, ' ', ''))""",
+            (player,),
+        ).fetchone()
+        return int(row["total"] or 0)
+    finally:
+        conn.close()
+
+
+def get_player_pvp_kills(player: str) -> int:
+    conn = db()
+    try:
+        row = conn.execute(
+            """SELECT COUNT(*) AS kills
+               FROM events
+               WHERE event_type='pvp_kill'
+                 AND LOWER(REPLACE(player, ' ', '')) =
+                     LOWER(REPLACE(?, ' ', ''))""",
+            (player,),
+        ).fetchone()
+        return int(row["kills"] or 0)
+    finally:
+        conn.close()
+
+
+def claim_milestones(player: str, milestone_type: str, thresholds):
+    """Atomically claim newly reached milestones so each is announced once."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn = db()
+    claimed = []
+    try:
+        for threshold in thresholds:
+            cur = conn.execute(
+                """INSERT OR IGNORE INTO milestone_announcements
+                   (player_key, milestone_type, threshold, created_at)
+                   VALUES (?, ?, ?, ?)""",
+                (player_key(player), milestone_type, threshold, now),
+            )
+            if cur.rowcount == 1:
+                claimed.append(threshold)
+        conn.commit()
+        return claimed
+    finally:
+        conn.close()
+
+
+async def send_milestone_announcement(
+    message: discord.Message,
+    player: str,
+    title: str,
+    description: str,
+    color: discord.Color,
+):
+    channel = bot.get_channel(WEEKLY_LOOT_ANNOUNCEMENT_CHANNEL_ID)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(WEEKLY_LOOT_ANNOUNCEMENT_CHANNEL_ID)
+        except Exception as exc:
+            print(f"ERROR: Could not access milestone announcement channel: {exc}")
+            return
+
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=color,
+        timestamp=datetime.now(timezone.utc),
+    )
+    discord_id = get_linked_discord_id(player)
+    mention = f"<@{discord_id}>" if discord_id is not None else None
+    await channel.send(content=mention, embed=embed)
+
+
+def build_show_drop_url(message: discord.Message) -> str:
+    return (
+        f"https://discord.com/channels/"
+        f"{message.guild.id if message.guild else '@me'}/"
+        f"{message.channel.id}/{message.id}"
+    )
+
+
+async def process_milestone_announcements(
+    message: discord.Message,
+    parsed: dict,
+    previous_loot_total=None,
+    previous_pvp_kills=None,
+):
+    player = parsed["player"]
+    event_type = parsed["event_type"]
+
+    if event_type == "loot":
+        total_loot = get_player_loot_total(player)
+
+        crossed = [
+            threshold for threshold in LOOT_MILESTONES
+            if (previous_loot_total or 0) < threshold <= total_loot
+        ]
+        claimed = claim_milestones(player, "loot_total", crossed)
+
+        for threshold in claimed:
+            await send_milestone_announcement(
+                message,
+                player,
+                "🏆 LOOT MILESTONE",
+                (
+                    f"**{player}** has reached **{format_gp(threshold)} GP** "
+                    f"in total recorded loot! 💰"
+                ),
+                discord.Color.gold(),
+            )
+
+        # Every individual loot drop worth 20M+ gets a big-drop announcement.
+        # The message ID is used as the unique claim key so edited/reprocessed
+        # Dink messages cannot create the same announcement twice.
+        value_gp = int(parsed.get("value_gp") or 0)
+        if value_gp >= BIG_DROP_ANNOUNCEMENT_MIN_GP:
+            claimed = claim_milestones(
+                player,
+                "big_drop_message",
+                [int(message.id)],
+            )
+            if claimed:
+                item = (
+                    parsed.get("loot_item")
+                    or parsed.get("source")
+                    or "Loot drop"
+                )
+                drop_url = build_show_drop_url(message)
+                embed = discord.Embed(
+                    title="💎 BIG DROP!",
+                    description=(
+                        f"**{player}** just received **{item}** worth "
+                        f"**{format_gp(value_gp)} GP**! 🎉\n\n"
+                        f"[Show Drop]({drop_url})"
+                    ),
+                    color=discord.Color.purple(),
+                    timestamp=datetime.now(timezone.utc),
+                )
+                channel = bot.get_channel(WEEKLY_LOOT_ANNOUNCEMENT_CHANNEL_ID)
+                if channel is None:
+                    try:
+                        channel = await bot.fetch_channel(
+                            WEEKLY_LOOT_ANNOUNCEMENT_CHANNEL_ID
+                        )
+                    except Exception as exc:
+                        print(f"ERROR: Could not access big-drop channel: {exc}")
+                        return
+                discord_id = get_linked_discord_id(player)
+                mention = f"<@{discord_id}>" if discord_id is not None else None
+                await channel.send(content=mention, embed=embed)
+
+    elif event_type == "pvp_kill":
+        kills = get_player_pvp_kills(player)
+
+        crossed = [
+            threshold for threshold in PVP_KILL_MILESTONES
+            if (previous_pvp_kills or 0) < threshold <= kills
+        ]
+        claimed = claim_milestones(player, "pvp_kills", crossed)
+
+        for threshold in claimed:
+            await send_milestone_announcement(
+                message,
+                player,
+                "⚔️ PVP KILL MILESTONE",
+                (
+                    f"**{player}** has reached **{threshold:,} PvP kills**! "
+                    f"⚔️"
+                ),
+                discord.Color.red(),
+            )
 
 
 def add_chunked_field(embed: discord.Embed, field_name: str, lines):
@@ -544,11 +821,22 @@ def weekly_reset_countdown():
 def get_weekly_loot_stats(limit=15):
     """Return the current Monday-Sunday weekly ranking.
 
+    The active week always starts at the most recent Monday 00:00 and ends
+    at the following Monday 00:00. This is deliberately calculated in Python
+    using the bot's normal local datetime behavior, so Monday immediately
+    starts a completely fresh weekly ranking.
+
     ONLY this weekly ranking combines multiple OSRS accounts that are linked
     to the same Discord ID. All other leaderboards continue to use OSRS names.
-    Linked players are displayed as Discord mentions; unlinked players remain shown
-    by their OSRS name.
+    Linked players are displayed by Discord mention; unlinked players remain
+    shown by their OSRS name.
     """
+    now = datetime.now()
+    week_start = (now - timedelta(days=now.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    next_week = week_start + timedelta(days=7)
+
     conn = db()
     rows = conn.execute(
         """
@@ -570,8 +858,8 @@ def get_weekly_loot_stats(limit=15):
             LEFT JOIN player_discord_links pdl
                 ON pdl.player_key = LOWER(REPLACE(e.player, ' ', ''))
             WHERE e.event_type='loot'
-              AND datetime(e.created_at) >= datetime('now', 'localtime', 'weekday 1', '-7 days')
-              AND datetime(e.created_at) < datetime('now', 'localtime', 'weekday 1')
+              AND datetime(e.created_at) >= datetime(?)
+              AND datetime(e.created_at) < datetime(?)
             GROUP BY ranking_key, display_name
         )
         SELECT display_name AS player, loot_gp, loot_drops
@@ -579,7 +867,9 @@ def get_weekly_loot_stats(limit=15):
         ORDER BY loot_gp DESC, display_name COLLATE NOCASE
         LIMIT ?
         """,
-        (limit,),
+        (week_start.strftime("%Y-%m-%d %H:%M:%S"),
+         next_week.strftime("%Y-%m-%d %H:%M:%S"),
+         limit),
     ).fetchall()
     conn.close()
     return rows
@@ -1747,22 +2037,14 @@ WEEKLY_WINNER_LAST_AWARDED_KEY = "weekly_winner_last_awarded_week"
 def get_previous_completed_week_key():
     """Return the Monday date for the most recently completed Monday-Sunday week.
 
-    On Monday, the week that just ended is the Monday immediately before today.
-    On every other day, the most recently completed week is the Monday before
-    the current week.
+    The active week starts every Monday at 00:00. Therefore the completed week
+    is always the Monday immediately before the current Monday.
     """
     now = datetime.now()
-    this_monday = now - timedelta(days=now.weekday())
-    this_monday = this_monday.replace(hour=0, minute=0, second=0, microsecond=0)
-
-    # At the start of Monday, the previous Monday-Sunday period has just ended.
-    # During the rest of the week, that Monday-Sunday period is still active,
-    # so the most recently completed period is the one before it.
-    if now.weekday() == 0:
-        completed_monday = this_monday
-    else:
-        completed_monday = this_monday - timedelta(days=7)
-
+    this_monday = (now - timedelta(days=now.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    completed_monday = this_monday - timedelta(days=7)
     return completed_monday.strftime("%Y-%m-%d")
 
 
@@ -2124,6 +2406,83 @@ async def on_message_edit(before: discord.Message, after: discord.Message):
     if after.channel.id in (DROPS_CHANNEL_ID, DEATHS_CHANNEL_ID):
         if await process_message(after):
             await update_leaderboard()
+
+
+@bot.tree.command(
+    name="announcetest",
+    description="Test a milestone or big-drop announcement."
+)
+@app_commands.describe(
+    player="OSRS player to use for the test",
+    announcement="Announcement type to test",
+)
+@app_commands.choices(announcement=[
+    app_commands.Choice(name="Loot milestone", value="loot"),
+    app_commands.Choice(name="PvP kill milestone", value="pvp"),
+    app_commands.Choice(name="Big drop", value="bigdrop"),
+])
+@app_commands.checks.has_permissions(manage_guild=True)
+async def announcetest_command(
+    interaction: discord.Interaction,
+    player: str,
+    announcement: app_commands.Choice[str],
+):
+    await interaction.response.defer(ephemeral=True)
+
+    discord_id = get_linked_discord_id(player)
+    mention = f"<@{discord_id}>" if discord_id is not None else None
+
+    if announcement.value == "loot":
+        title = "🏆 LOOT MILESTONE"
+        description = (
+            f"**{player}** has reached **100.00M GP** "
+            f"in total recorded loot! 💰"
+        )
+        color = discord.Color.gold()
+    elif announcement.value == "pvp":
+        title = "⚔️ PVP KILL MILESTONE"
+        description = f"**{player}** has reached **50 PvP kills**! ⚔️"
+        color = discord.Color.red()
+    else:
+        title = "💎 BIG DROP!"
+        description = (
+            f"**{player}** just received **Tumeken's Shadow** worth "
+            f"**137.00M GP**! 🎉\n\n"
+            "[Show Drop](https://discord.com)"
+        )
+        color = discord.Color.purple()
+
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=color,
+        timestamp=datetime.now(timezone.utc),
+    )
+
+    channel = bot.get_channel(WEEKLY_LOOT_ANNOUNCEMENT_CHANNEL_ID)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(WEEKLY_LOOT_ANNOUNCEMENT_CHANNEL_ID)
+        except Exception as exc:
+            await interaction.followup.send(
+                f"❌ Could not access the announcement channel: `{exc}`",
+                ephemeral=True,
+            )
+            return
+
+    await channel.send(content=mention, embed=embed)
+
+    if mention:
+        await interaction.followup.send(
+            f"✅ Test announcement sent and {mention} was tagged.",
+            ephemeral=True,
+        )
+    else:
+        await interaction.followup.send(
+            "✅ Test announcement sent. No Discord ID is linked to this player, "
+            "so nobody was tagged.",
+            ephemeral=True,
+        )
 
 
 @bot.tree.command(
