@@ -2923,10 +2923,6 @@ async def send_player_stats(interaction: discord.Interaction, player: str):
     pvp_kills = get_player_pvp_kills(player_name)
     weekly_wins = get_weekly_loot_win_count(player_name)
 
-    # Preserve the existing completion calculation.
-    completion_rows = get_player_completions(player_name)
-    completions = sum(r["completions"] or 0 for r in completion_rows)
-
     linked_discord_id = get_linked_discord_id(player_name)
 
     # Progress toward the next lifetime loot milestone.
@@ -3000,13 +2996,6 @@ async def send_player_stats(interaction: discord.Interaction, player: str):
         ),
         inline=False,
     )
-
-    if completions:
-        embed.add_field(
-            name="🏁 COMPLETIONS",
-            value=f"**{completions:,}**",
-            inline=True,
-        )
 
     if linked_discord_id:
         embed.add_field(
