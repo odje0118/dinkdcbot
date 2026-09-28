@@ -2872,6 +2872,23 @@ async def leaderboard_command(interaction: discord.Interaction):
     )
 
 
+def get_linked_player_accounts(discord_id: int):
+    conn = db()
+    try:
+        rows = conn.execute(
+            """
+            SELECT player_name
+            FROM player_discord_links
+            WHERE discord_id = ?
+            ORDER BY player_name COLLATE NOCASE
+            """,
+            (discord_id,),
+        ).fetchall()
+        return [row["player_name"] for row in rows]
+    finally:
+        conn.close()
+
+
 async def send_player_stats(interaction: discord.Interaction, player: str):
     row = get_player_stats(player)
 
@@ -2910,6 +2927,17 @@ async def send_player_stats(interaction: discord.Interaction, player: str):
             value=f"<@{linked_discord_id}>\n`{linked_discord_id}`",
             inline=False,
         )
+
+        linked_accounts = get_linked_player_accounts(int(linked_discord_id))
+        if linked_accounts:
+            accounts_text = "\n".join(
+                f"• **{account}**" for account in linked_accounts
+            )
+            embed.add_field(
+                name="👤 Linked OSRS Accounts",
+                value=accounts_text,
+                inline=False,
+            )
     else:
         embed.add_field(
             name="🔗 Discord ID",
@@ -3117,8 +3145,48 @@ async def refreshnames_error(interaction: discord.Interaction, error: app_comman
 
 
 @bot.tree.command(name="player", description="Show detailed stats for a player.")
-@app_commands.describe(player="The exact player name")
-async def player_command(interaction: discord.Interaction, player: str):
+@app_commands.describe(
+    player="OSRS player name (type it manually)",
+    member="Discord member linked to the OSRS player",
+)
+async def player_command(
+    interaction: discord.Interaction,
+    player: str | None = None,
+    member: discord.Member | None = None,
+):
+    # Allow either an OSRS name or a Discord member lookup.
+    if member is not None:
+        discord_id = member.id
+        conn = db()
+        row = conn.execute(
+            """
+            SELECT player
+            FROM player_discord_links
+            WHERE discord_id = ?
+            ORDER BY player COLLATE NOCASE
+            LIMIT 1
+            """,
+            (discord_id,),
+        ).fetchone()
+        conn.close()
+
+        if row is None:
+            await interaction.response.send_message(
+                f"❌ {member.mention} does not have a linked OSRS player.",
+                ephemeral=True,
+            )
+            return
+
+        await send_player_stats(interaction, row["player"])
+        return
+
+    if not player:
+        await interaction.response.send_message(
+            "❌ Please provide an OSRS player name or select a Discord member.",
+            ephemeral=True,
+        )
+        return
+
     await send_player_stats(interaction, player)
 
 
