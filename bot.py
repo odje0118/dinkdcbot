@@ -3160,10 +3160,10 @@ async def player_command(
         conn = db()
         row = conn.execute(
             """
-            SELECT player
+            SELECT player_name
             FROM player_discord_links
             WHERE discord_id = ?
-            ORDER BY player COLLATE NOCASE
+            ORDER BY player_name COLLATE NOCASE
             LIMIT 1
             """,
             (discord_id,),
@@ -3177,7 +3177,7 @@ async def player_command(
             )
             return
 
-        await send_player_stats(interaction, row["player"])
+        await send_player_stats(interaction, row["player_name"])
         return
 
     if not player:
