@@ -3146,17 +3146,18 @@ async def refreshnames_error(interaction: discord.Interaction, error: app_comman
 
 @bot.tree.command(name="player", description="Show detailed stats for a player.")
 @app_commands.describe(
-    player="OSRS Player name",
-    member="Discord member linked to OSRS player",
+    rsn="OSRS Player name",
+    discord_member="Discord member linked to OSRS player",
 )
+@app_commands.rename(discord_member="discord")
 async def player_command(
     interaction: discord.Interaction,
     rsn: str | None = None,
-    discord: discord.Member | None = None,
+    discord_member: discord.Member | None = None,
 ):
     # Allow either an OSRS name or a Discord member lookup.
-    if discord is not None:
-        discord_id = discord.id
+    if discord_member is not None:
+        discord_id = discord_member.id
         conn = db()
         row = conn.execute(
             """
@@ -3172,7 +3173,7 @@ async def player_command(
 
         if row is None:
             await interaction.response.send_message(
-                f"❌ {discord.mention} does not have a linked OSRS player.",
+                f"❌ {discord_member.mention} does not have a linked OSRS player.",
                 ephemeral=True,
             )
             return
