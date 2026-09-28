@@ -1256,27 +1256,8 @@ class ShowAllDropsSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         player = self.values[0]
-        _log_interaction_readable(interaction, "Show All Drops", player=player)
-        rows = get_player_loot_events(player)
-
-        if not rows:
-            await interaction.response.send_message(
-                f"No recorded drops found for **{player}**.",
-                ephemeral=True,
-            )
-            return
-
-        view = PlayerDropsPages(
-            player=player,
-            rows=rows,
-            owner_id=interaction.user.id,
-        )
-
-        await interaction.response.send_message(
-            embed=view.build_embed(),
-            view=view,
-            ephemeral=True,
-        )
+        _log_interaction_readable(interaction, "Player Profile", player=player)
+        await send_player_stats(interaction, player)
 
 
 class LeaderboardCategoryButton(discord.ui.Button):
@@ -1337,7 +1318,7 @@ class LeaderboardView(discord.ui.View):
             discord.SelectOption(
                 label=player[:100],
                 value=player[:100],
-                description="View all recorded drops",
+                description="View player profile",
             )
             for player in players[:25]
         ]
