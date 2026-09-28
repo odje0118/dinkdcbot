@@ -1986,13 +1986,38 @@ async def remove_weekly_loot_role_from_others(
     if role is None:
         return
 
+    # role.members can be incomplete when the member cache has not been
+    # populated. Fetch the guild members from Discord so role rotation also
+    # works reliably from /roletest and after a bot restart.
+    members_with_role = {}
+
     for member in list(role.members):
+        members_with_role[member.id] = member
+
+    try:
+        async for member in guild.fetch_members(limit=None):
+            if role in member.roles:
+                members_with_role[member.id] = member
+    except (discord.Forbidden, discord.HTTPException) as exc:
+        print(f"Could not fetch guild members for role cleanup: {exc}")
+
+    for member in members_with_role.values():
         if keep_member_id is not None and member.id == keep_member_id:
             continue
         try:
-            await member.remove_roles(role, reason="Weekly Loot Winner rotation")
+            await member.remove_roles(
+                role,
+                reason="Weekly Loot Winner rotation",
+            )
+            print(
+                f"Removed Weekly Loot Winner role from {member} "
+                f"({member.id})"
+            )
         except (discord.Forbidden, discord.HTTPException) as exc:
-            print(f"Could not remove Weekly Loot Winner role from {member}: {exc}")
+            print(
+                f"Could not remove Weekly Loot Winner role from "
+                f"{member} ({member.id}): {exc}"
+            )
 
 
 async def grant_weekly_loot_role(player: str, guild: discord.Guild):
