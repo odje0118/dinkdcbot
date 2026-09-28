@@ -3146,18 +3146,17 @@ async def refreshnames_error(interaction: discord.Interaction, error: app_comman
 
 @bot.tree.command(name="player", description="Show detailed stats for a player.")
 @app_commands.describe(
-    rsn="OSRS Player name",
-    discord_member="Discord member linked to OSRS player",
+    player="OSRS player name (type it manually)",
+    member="Discord member linked to the OSRS player",
 )
-@app_commands.rename(discord_member="discord")
 async def player_command(
     interaction: discord.Interaction,
-    rsn: str | None = None,
-    discord_member: discord.Member | None = None,
+    player: str | None = None,
+    member: discord.Member | None = None,
 ):
     # Allow either an OSRS name or a Discord member lookup.
-    if discord_member is not None:
-        discord_id = discord_member.id
+    if member is not None:
+        discord_id = member.id
         conn = db()
         row = conn.execute(
             """
@@ -3173,7 +3172,7 @@ async def player_command(
 
         if row is None:
             await interaction.response.send_message(
-                f"❌ {discord_member.mention} does not have a linked OSRS player.",
+                f"❌ {member.mention} does not have a linked OSRS player.",
                 ephemeral=True,
             )
             return
@@ -3181,14 +3180,14 @@ async def player_command(
         await send_player_stats(interaction, row["player_name"])
         return
 
-    if not rsn:
+    if not player:
         await interaction.response.send_message(
             "❌ Please provide an OSRS player name or select a Discord member.",
             ephemeral=True,
         )
         return
 
-    await send_player_stats(interaction, rsn)
+    await send_player_stats(interaction, player)
 
 
 @bot.tree.command(name="backfill", description="Import existing Dink messages from DROPS and DEATHS.")
