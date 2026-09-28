@@ -1089,6 +1089,48 @@ def get_top_activity_per_player(limit=15):
 
 
 
+def get_player_weekly_stats(player: str):
+    """Return this player's loot and drop count for the current weekly period."""
+    conn = db()
+    try:
+        row = conn.execute(
+            """
+            SELECT
+                COALESCE(SUM(value_gp), 0) AS loot_gp,
+                COUNT(*) AS loot_drops
+            FROM events
+            WHERE event_type='loot'
+              AND LOWER(REPLACE(player, ' ', '')) = LOWER(REPLACE(?, ' ', ''))
+              AND datetime(created_at) >= datetime(?, '00:00:00')
+            """,
+            (player, current_week_monday().isoformat()),
+        ).fetchone()
+        return row
+    finally:
+        conn.close()
+
+
+def get_player_records(player: str):
+    """Return useful lifetime records for the player profile."""
+    conn = db()
+    try:
+        row = conn.execute(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN event_type='loot' THEN value_gp ELSE 0 END), 0) AS total_loot,
+                COALESCE(SUM(CASE WHEN event_type='loot' THEN 1 ELSE 0 END), 0) AS loot_drops,
+                MAX(CASE WHEN event_type='loot' THEN value_gp ELSE 0 END) AS biggest_drop,
+                MAX(CASE WHEN event_type='loot' THEN created_at ELSE NULL END) AS last_drop
+            FROM events
+            WHERE LOWER(REPLACE(player, ' ', '')) = LOWER(REPLACE(?, ' ', ''))
+            """,
+            (player,),
+        ).fetchone()
+        return row
+    finally:
+        conn.close()
+
+
 def get_player_loot_events(player: str):
     conn = db()
     rows = conn.execute(
@@ -1108,26 +1150,63 @@ def get_player_loot_events(player: str):
 class PlayerDropsPages(discord.ui.View):
     """Paginated private view for all drops belonging to one player."""
 
+    FILTERS = [
+        ("All", 0),
+        ("10M+", 10_000_000),
+        ("50M+", 50_000_000),
+        ("100M+", 100_000_000),
+    ]
+
     def __init__(self, player, rows, owner_id, return_to_profile=False):
         super().__init__(timeout=300)
         self.player = player
-        self.rows = list(rows)
+        self.all_rows = list(rows)
         self.owner_id = owner_id
         self.return_to_profile = return_to_profile
         self.page = 0
         self.per_page = 10
+        self.filter_index = 0
+        self.sort_mode = "newest"
         self._refresh_buttons()
+
+    @property
+    def rows(self):
+        min_gp = self.FILTERS[self.filter_index][1]
+        rows = [
+            row for row in self.all_rows
+            if (row["value_gp"] or 0) >= min_gp
+        ]
+
+        if self.sort_mode == "highest":
+            rows.sort(key=lambda r: (r["value_gp"] or 0), reverse=True)
+        elif self.sort_mode == "lowest":
+            rows.sort(key=lambda r: (r["value_gp"] or 0))
+        else:
+            rows.sort(
+                key=lambda r: (str(r["created_at"] or ""), str(r["message_id"] or "")),
+                reverse=True,
+            )
+        return rows
 
     @property
     def total_pages(self):
         return max(1, (len(self.rows) + self.per_page - 1) // self.per_page)
 
     def build_embed(self):
+        rows = self.rows
         start = self.page * self.per_page
-        page_rows = self.rows[start:start + self.per_page]
+        page_rows = rows[start:start + self.per_page]
 
-        total = sum(row["value_gp"] or 0 for row in self.rows)
+        total = sum(row["value_gp"] or 0 for row in rows)
         weekly_wins = get_weekly_loot_win_count(self.player)
+        filter_name = self.FILTERS[self.filter_index][0]
+        sort_names = {
+            "newest": "Newest",
+            "highest": "Highest GP",
+            "lowest": "Lowest GP",
+        }
+        sort_name = sort_names[self.sort_mode]
+
         guild_id = None
         drops_channel = bot.get_channel(DROPS_CHANNEL_ID)
         if drops_channel and getattr(drops_channel, "guild", None):
@@ -1147,24 +1226,34 @@ class PlayerDropsPages(discord.ui.View):
                 f"**{item}** • [Show drop]({jump_url})"
             )
 
+        if not lines:
+            lines.append("No drops match this filter.")
+
         embed = discord.Embed(
             title=f"💎 {self.player} — ALL DROPS",
             description=(
-                f"**{len(self.rows):,} "
-                f"{'drop' if len(self.rows) == 1 else 'drops'}** • "
+                f"**{len(rows):,} "
+                f"{'drop' if len(rows) == 1 else 'drops'}** • "
                 f"**{format_gp(total)} GP** total\n"
                 f"🏆 **Weekly Loot Wins: {weekly_wins}**\n"
+                f"🔎 **Filter:** {filter_name} • **Sort:** {sort_name}\n"
                 f"⚠️ Only Dink drops of **500K GP+** are recorded.\n\n"
                 + "\n".join(lines)
             ),
             color=discord.Color.green(),
             timestamp=datetime.now(timezone.utc),
         )
-        embed.set_footer(
-            text=f"Page {self.page + 1}/{self.total_pages} • "
-                 f"Showing {start + 1}-{min(start + self.per_page, len(self.rows))} "
-                 f"of {len(self.rows)} drops"
-        )
+
+        if rows:
+            shown_start = start + 1
+            shown_end = min(start + self.per_page, len(rows))
+            footer = (
+                f"Page {self.page + 1}/{self.total_pages} • "
+                f"Showing {shown_start}-{shown_end} of {len(rows)} drops"
+            )
+        else:
+            footer = "No drops match the selected filter."
+        embed.set_footer(text=footer)
         return embed
 
     def _refresh_buttons(self):
@@ -1175,17 +1264,26 @@ class PlayerDropsPages(discord.ui.View):
             emoji="◀️",
             style=discord.ButtonStyle.secondary,
             disabled=self.page <= 0,
+            row=0,
         )
         next_button = discord.ui.Button(
             label="Next",
             emoji="▶️",
             style=discord.ButtonStyle.secondary,
             disabled=self.page >= self.total_pages - 1,
+            row=0,
+        )
+        filter_button = discord.ui.Button(
+            label=f"Filter: {self.FILTERS[self.filter_index][0]}",
+            emoji="🔎",
+            style=discord.ButtonStyle.secondary,
+            row=0,
         )
         close = discord.ui.Button(
             label="Close",
             emoji="✖️",
             style=discord.ButtonStyle.danger,
+            row=0,
         )
 
         async def previous_callback(interaction):
@@ -1204,6 +1302,28 @@ class PlayerDropsPages(discord.ui.View):
             if not await self._check_owner(interaction):
                 return
             self.page += 1
+            self._refresh_buttons()
+            await interaction.response.edit_message(
+                embed=self.build_embed(),
+                view=self,
+            )
+
+        async def filter_callback(interaction):
+            if not await self._check_owner(interaction):
+                return
+            self.filter_index = (self.filter_index + 1) % len(self.FILTERS)
+            self.page = 0
+            self._refresh_buttons()
+            await interaction.response.edit_message(
+                embed=self.build_embed(),
+                view=self,
+            )
+
+        async def sort_callback(interaction):
+            if not await self._check_owner(interaction):
+                return
+            self.sort_mode = self.sort_select.values[0]
+            self.page = 0
             self._refresh_buttons()
             await interaction.response.edit_message(
                 embed=self.build_embed(),
@@ -1234,21 +1354,53 @@ class PlayerDropsPages(discord.ui.View):
 
         previous.callback = previous_callback
         next_button.callback = next_callback
+        filter_button.callback = filter_callback
         close.callback = close_callback
 
         self.add_item(previous)
         self.add_item(next_button)
+        self.add_item(filter_button)
 
         if self.return_to_profile:
             return_profile = discord.ui.Button(
                 label="Return to Profile",
                 emoji="👤",
                 style=discord.ButtonStyle.primary,
+                row=0,
             )
             return_profile.callback = return_profile_callback
             self.add_item(return_profile)
 
         self.add_item(close)
+
+        self.sort_select = discord.ui.Select(
+            placeholder="Sort drops...",
+            min_values=1,
+            max_values=1,
+            row=1,
+            options=[
+                discord.SelectOption(
+                    label="Newest",
+                    value="newest",
+                    emoji="🕒",
+                    default=self.sort_mode == "newest",
+                ),
+                discord.SelectOption(
+                    label="Highest GP",
+                    value="highest",
+                    emoji="💰",
+                    default=self.sort_mode == "highest",
+                ),
+                discord.SelectOption(
+                    label="Lowest GP",
+                    value="lowest",
+                    emoji="📉",
+                    default=self.sort_mode == "lowest",
+                ),
+            ],
+        )
+        self.sort_select.callback = sort_callback
+        self.add_item(self.sort_select)
 
     async def _check_owner(self, interaction):
         if interaction.user.id != self.owner_id:
@@ -1271,7 +1423,7 @@ class ShowAllDropsSelect(discord.ui.Select):
             max_values=1,
             options=options,
             custom_id="leaderboard_show_all_drops",
-            row=1,
+            row=2,
         )
 
     async def callback(self, interaction: discord.Interaction):
@@ -1312,6 +1464,22 @@ class LeaderboardCategoryButton(discord.ui.Button):
         await interaction.response.edit_message(embed=embed, view=view)
 
 
+class LeaderboardRefreshButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(
+            label="Refresh",
+            emoji="🔄",
+            style=discord.ButtonStyle.secondary,
+            custom_id="leaderboard_refresh",
+            row=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        _log_interaction_readable(interaction, "Leaderboard Refresh")
+        await interaction.response.defer()
+        await update_leaderboard()
+
+
 class LeaderboardView(discord.ui.View):
     """Single-message leaderboard navigation with persistent buttons."""
 
@@ -1329,6 +1497,8 @@ class LeaderboardView(discord.ui.View):
         self.add_item(LeaderboardCategoryButton("deaths", "Deaths", "💀"))
         self.add_item(LeaderboardCategoryButton("biggest", "Biggest Drop", "💎"))
         self.add_item(LeaderboardCategoryButton("activity", "Activity", "📍"))
+        self.add_item(LeaderboardCategoryButton("records", "Records", "🏆"))
+        self.add_item(LeaderboardRefreshButton())
 
         if self.player_select is not None:
             self.add_item(self.player_select)
@@ -1478,6 +1648,103 @@ async def remove_old_combined_leaderboard(channel):
     conn.close()
 
 
+def build_clan_records_embed(rows, biggest_rows):
+    """Build a compact clan records page from the same stored statistics."""
+    loot_rows = sorted(
+        [r for r in rows if (r["loot_gp"] or 0) > 0],
+        key=lambda r: (r["loot_gp"] or 0),
+        reverse=True,
+    )
+    death_rows = sorted(
+        [r for r in rows if (r["deaths"] or 0) > 0],
+        key=lambda r: (r["deaths"] or 0),
+        reverse=True,
+    )
+    pvp_rows = sorted(
+        rows,
+        key=lambda r: get_player_pvp_kills(r["player"]),
+        reverse=True,
+    )
+    weekly_rows = sorted(
+        rows,
+        key=lambda r: get_weekly_loot_win_count(r["player"]),
+        reverse=True,
+    )
+
+    embed = discord.Embed(
+        title="🏆 CLAN RECORDS",
+        description=(
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "**ALL-TIME CLAN RECORDS**\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "A quick overview of the current lifetime records."
+        ),
+        color=discord.Color.gold(),
+        timestamp=datetime.now(timezone.utc),
+    )
+
+    fields = []
+
+    if loot_rows:
+        row = loot_rows[0]
+        fields.append(
+            ("💰 MOST TOTAL LOOT",
+             f"**{row['player']}** — **{format_gp(row['loot_gp'] or 0)} GP**")
+        )
+
+    if biggest_rows:
+        row = biggest_rows[0]
+        item = row["loot_item"] or "Unknown item"
+        fields.append(
+            ("💎 BIGGEST SINGLE DROP",
+             f"**{row['player']}** — **{format_gp(row['value_gp'] or 0)} GP** • {item}")
+        )
+
+    if death_rows:
+        row = death_rows[0]
+        fields.append(
+            ("💀 MOST DEATHS",
+             f"**{row['player']}** — **{row['deaths']:,} deaths**")
+        )
+
+    if pvp_rows and get_player_pvp_kills(pvp_rows[0]["player"]) > 0:
+        row = pvp_rows[0]
+        kills = get_player_pvp_kills(row["player"])
+        fields.append(
+            ("⚔️ MOST PVP KILLS",
+             f"**{row['player']}** — **{kills:,} kills**")
+        )
+
+    if weekly_rows and get_weekly_loot_win_count(weekly_rows[0]["player"]) > 0:
+        row = weekly_rows[0]
+        wins = get_weekly_loot_win_count(row["player"])
+        fields.append(
+            ("🏆 MOST WEEKLY WINS",
+             f"**{row['player']}** — **{wins:,} wins**")
+        )
+
+    if death_rows:
+        expensive_death = max(
+            death_rows,
+            key=lambda r: (r["death_value_gp"] or 0),
+        )
+        if (expensive_death["death_value_gp"] or 0) > 0:
+            fields.append(
+                ("💸 MOST EXPENSIVE DEATH",
+                 f"**{expensive_death['player']}** — "
+                 f"**{format_gp(expensive_death['death_value_gp'])} GP**")
+            )
+
+    if not fields:
+        embed.description += "\n\nNo records are available yet."
+    else:
+        for name, value in fields:
+            embed.add_field(name=name, value=value, inline=False)
+
+    embed.set_footer(text="Updated automatically")
+    return embed
+
+
 async def update_leaderboard():
     async with update_lock:
         global leaderboard_view
@@ -1494,6 +1761,7 @@ async def update_leaderboard():
         weekly_loot_rows = get_weekly_loot_stats(15)
         biggest_per_player_rows = get_biggest_drop_per_player(15)
         top_activity_rows = get_top_activity_per_player(15)
+        records_embed = build_clan_records_embed(rows, get_biggest_drops(1))
 
         # -------------------- LOOT LEADERBOARD --------------------
         loot_embed = discord.Embed(
@@ -1706,6 +1974,7 @@ async def update_leaderboard():
             "deaths": death_embed,
             "biggest": biggest_embed,
             "activity": activity_embed,
+            "records": records_embed,
         }
 
         # Reuse one persistent View so buttons keep pointing at fresh embeds.
@@ -2983,6 +3252,8 @@ async def send_player_stats(interaction: discord.Interaction, player: str, edit_
     death_value = int(row["death_value_gp"] or 0)
     pvp_kills = get_player_pvp_kills(player_name)
     weekly_wins = get_weekly_loot_win_count(player_name)
+    weekly_stats = get_player_weekly_stats(player_name)
+    player_records = get_player_records(player_name)
 
     linked_discord_id = get_linked_discord_id(player_name)
 
@@ -3054,6 +3325,47 @@ async def send_player_stats(interaction: discord.Interaction, player: str, edit_
             f"💸 **PvP GP Lost:** {format_gp(death_value)} GP\n"
             f"⚔️ **PvP Kills:** {pvp_kills:,}\n"
             f"🏆 **Weekly Loot Wins:** {weekly_wins:,}"
+        ),
+        inline=False,
+    )
+
+    loot_milestones_done = sum(1 for threshold in LOOT_MILESTONES if loot >= threshold)
+    pvp_milestones_done = sum(1 for threshold in PVP_KILL_MILESTONES if pvp_kills >= threshold)
+
+    weekly_gp = int(weekly_stats["loot_gp"] or 0)
+    weekly_drops = int(weekly_stats["loot_drops"] or 0)
+
+    average_drop = (
+        int(loot / drops)
+        if drops > 0
+        else 0
+    )
+    biggest_drop = int(player_records["biggest_drop"] or 0)
+
+    embed.add_field(
+        name="🏅 MILESTONES",
+        value=(
+            f"💰 Loot: **{loot_milestones_done}/{len(LOOT_MILESTONES)}**\\n"
+            f"⚔️ PvP: **{pvp_milestones_done}/{len(PVP_KILL_MILESTONES)}**"
+        ),
+        inline=True,
+    )
+
+    embed.add_field(
+        name="💎 RECORDS",
+        value=(
+            f"🥇 Biggest Drop: **{format_gp(biggest_drop)} GP**\\n"
+            f"📊 Average Drop: **{format_gp(average_drop)} GP**"
+        ),
+        inline=True,
+    )
+
+    embed.add_field(
+        name="📅 THIS WEEK",
+        value=(
+            f"💰 **{format_gp(weekly_gp)} GP**\\n"
+            f"🎁 **{weekly_drops:,} drops**\\n"
+            f"🏆 **{weekly_wins:,} weekly wins**"
         ),
         inline=False,
     )
