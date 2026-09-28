@@ -1637,7 +1637,7 @@ async def update_leaderboard():
                 "━━━━━━━━━━━━━━━━━━━━\n"
                 "**TOTAL LOOT RANKING**\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
-                "Total loot accumulated per OSRS player across all recorded Dink drops.\n\n"
+                "Total loot earned per OSRS player across all recorded drops.\n\n"
                 "⚠️ Only Dink drops of **500K GP+** are recorded."
             ),
             color=discord.Color.green(),
@@ -1730,7 +1730,7 @@ async def update_leaderboard():
                 "━━━━━━━━━━━━━━━━━━━━\n"
                 "**MOST DEATHS**\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
-                "Total deaths reported by Dink, ranked by death count. PvP loss is shown when available."
+                "Total deaths reported, ranked by death count."
             ),
             color=discord.Color.red(),
             timestamp=datetime.now(timezone.utc),
