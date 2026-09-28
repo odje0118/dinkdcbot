@@ -2450,6 +2450,27 @@ async def on_message_edit(before: discord.Message, after: discord.Message):
             await update_leaderboard()
 
 
+def get_latest_big_drop_for_player(player: str):
+    conn = db()
+    try:
+        row = conn.execute(
+            """
+            SELECT message_id, channel_id, loot_item, source, value_gp
+            FROM events
+            WHERE event_type='loot'
+              AND LOWER(REPLACE(player, ' ', '')) =
+                  LOWER(REPLACE(?, ' ', ''))
+              AND value_gp >= ?
+            ORDER BY datetime(created_at) DESC, message_id DESC
+            LIMIT 1
+            """,
+            (player, BIG_DROP_ANNOUNCEMENT_MIN_GP),
+        ).fetchone()
+        return row
+    finally:
+        conn.close()
+
+
 @bot.tree.command(
     name="announcetest",
     description="Test a milestone or big-drop announcement."
@@ -2475,22 +2496,66 @@ async def announcetest_command(
     mention = f"<@{discord_id}>" if discord_id is not None else None
 
     if announcement.value == "loot":
+        total_loot = get_player_loot_total(player)
+        achieved = [threshold for threshold in LOOT_MILESTONES if threshold <= total_loot]
+
+        if not achieved:
+            await interaction.followup.send(
+                f"❌ **{player}** has not reached any loot milestone yet "
+                f"(current total: **{format_gp(total_loot)} GP**).",
+                ephemeral=True,
+            )
+            return
+
+        threshold = max(achieved)
         title = "🏆 LOOT MILESTONE"
         description = (
-            f"**{player}** has reached **100.00M GP** "
+            f"**{player}** has reached **{format_gp(threshold)} GP** "
             f"in total recorded loot! 💰"
         )
         color = discord.Color.gold()
+
     elif announcement.value == "pvp":
+        kills = get_player_pvp_kills(player)
+        achieved = [threshold for threshold in PVP_KILL_MILESTONES if threshold <= kills]
+
+        if not achieved:
+            await interaction.followup.send(
+                f"❌ **{player}** has not reached any PvP kill milestone yet "
+                f"(current total: **{kills:,} kills**).",
+                ephemeral=True,
+            )
+            return
+
+        threshold = max(achieved)
         title = "⚔️ PVP KILL MILESTONE"
-        description = f"**{player}** has reached **50 PvP kills**! ⚔️"
+        description = f"**{player}** has reached **{threshold:,} PvP kills**! ⚔️"
         color = discord.Color.red()
+
     else:
+        drop = get_latest_big_drop_for_player(player)
+
+        if drop is None:
+            await interaction.followup.send(
+                f"❌ **{player}** has no recorded drop of "
+                f"**{format_gp(BIG_DROP_ANNOUNCEMENT_MIN_GP)} GP+** yet.",
+                ephemeral=True,
+            )
+            return
+
+        item = drop["loot_item"] or drop["source"] or "Loot drop"
+        value_gp = int(drop["value_gp"] or 0)
+        guild_id = interaction.guild.id if interaction.guild else "@me"
+        drop_url = (
+            f"https://discord.com/channels/{guild_id}/"
+            f"{drop['channel_id']}/{drop['message_id']}"
+        )
+
         title = "💎 BIG DROP!"
         description = (
-            f"**{player}** just received **Tumeken's Shadow** worth "
-            f"**137.00M GP**! 🎉\n\n"
-            "[Show Drop](https://discord.com)"
+            f"**{player}** just received **{item}** worth "
+            f"**{format_gp(value_gp)} GP**! 🎉\n\n"
+            f"[Show Drop]({drop_url})"
         )
         color = discord.Color.purple()
 
@@ -2516,13 +2581,14 @@ async def announcetest_command(
 
     if mention:
         await interaction.followup.send(
-            f"✅ Test announcement sent and {mention} was tagged.",
+            f"✅ Test announcement sent using **{player}'s real data** "
+            f"and {mention} was tagged.",
             ephemeral=True,
         )
     else:
         await interaction.followup.send(
-            "✅ Test announcement sent. No Discord ID is linked to this player, "
-            "so nobody was tagged.",
+            f"✅ Test announcement sent using **{player}'s real data**. "
+            "No Discord ID is linked to this player, so nobody was tagged.",
             ephemeral=True,
         )
 
