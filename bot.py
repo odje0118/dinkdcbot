@@ -2,16 +2,12 @@ import os
 import re
 import sqlite3
 import asyncio
-import io
-import urllib.parse
-import urllib.request
 from datetime import datetime, timezone, timedelta
 
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
-from PIL import Image, ImageDraw, ImageFont
 
 load_dotenv()
 
@@ -3270,222 +3266,6 @@ def build_player_weekly_embed(player: str):
     return embed
 
 
-OSRS_SKILLS = [
-    "Overall", "Attack", "Defence", "Strength", "Hitpoints", "Ranged", "Prayer", "Magic",
-    "Cooking", "Woodcutting", "Fletching", "Fishing", "Firemaking", "Crafting", "Smithing",
-    "Mining", "Herblore", "Agility", "Thieving", "Slayer", "Farming", "Runecraft", "Hunter",
-    "Construction",
-]
-
-
-def _font(size: int, bold: bool = False):
-    candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
-    ]
-    for path in candidates:
-        try:
-            return ImageFont.truetype(path, size)
-        except OSError:
-            continue
-    return ImageFont.load_default()
-
-
-def _format_xp(xp: int) -> str:
-    if xp >= 1_000_000_000:
-        return f"{xp / 1_000_000_000:.2f}B"
-    if xp >= 1_000_000:
-        return f"{xp / 1_000_000:.2f}M"
-    if xp >= 1_000:
-        return f"{xp / 1_000:.1f}K"
-    return str(xp)
-
-
-def _skill_icon_color(name: str):
-    palette = [
-        (181, 124, 65), (148, 148, 148), (205, 170, 65), (120, 165, 205),
-        (176, 92, 92), (92, 145, 188), (120, 100, 175), (92, 118, 185),
-    ]
-    return palette[sum(ord(c) for c in name) % len(palette)]
-
-
-def build_osrs_stats_image(player: str, stats: list[dict]) -> io.BytesIO:
-    """Create a RuneScape-inspired skills panel as a PNG attachment."""
-    width, height = 980, 860
-    img = Image.new("RGB", (width, height), (22, 22, 22))
-    draw = ImageDraw.Draw(img)
-
-    title_font = _font(30, True)
-    header_font = _font(18, True)
-    skill_font = _font(17, True)
-    small_font = _font(14)
-    xp_font = _font(13)
-
-    # Outer frame / header
-    draw.rectangle((12, 12, width - 12, height - 12), fill=(37, 37, 37), outline=(132, 105, 58), width=3)
-    draw.rectangle((24, 24, width - 24, 92), fill=(49, 43, 34), outline=(105, 87, 54), width=2)
-    draw.text((46, 38), f"OLD SCHOOL RUNESCAPE  •  {player}", font=title_font, fill=(245, 214, 133))
-
-    overall = stats[0]
-    total_level = overall["level"]
-    total_xp = overall["xp"]
-    draw.text((46, 67), f"Total level: {total_level:,}    Total XP: {_format_xp(total_xp)}", font=small_font, fill=(215, 215, 215))
-
-    # Two-column skill grid.
-    skills = stats[1:]
-    left = 36
-    right = width // 2 + 8
-    start_y = 116
-    row_h = 55
-    col_w = width // 2 - 52
-
-    for i, skill in enumerate(skills):
-        col = 0 if i < 12 else 1
-        row = i if i < 12 else i - 12
-        x = left if col == 0 else right
-        y = start_y + row * row_h
-
-        # Skill card
-        draw.rounded_rectangle((x, y, x + col_w, y + row_h - 7), radius=7, fill=(45, 45, 45), outline=(72, 72, 72), width=1)
-        icon_color = _skill_icon_color(skill["name"])
-        draw.ellipse((x + 9, y + 9, x + 39, y + 39), fill=icon_color, outline=(210, 210, 210), width=1)
-        initials = skill["name"][0] if skill["name"] != "Runecraft" else "R"
-        bbox = draw.textbbox((0, 0), initials, font=small_font)
-        draw.text((x + 24 - (bbox[2] - bbox[0]) / 2, y + 24 - (bbox[3] - bbox[1]) / 2 - 1), initials, font=small_font, fill=(245, 245, 245))
-
-        draw.text((x + 50, y + 8), skill["name"], font=skill_font, fill=(238, 238, 238))
-        draw.text((x + col_w - 92, y + 8), f"{skill['level']:,}", font=header_font, fill=(245, 214, 133))
-        draw.text((x + 50, y + 31), f"{_format_xp(skill['xp'])} XP", font=xp_font, fill=(175, 175, 175))
-
-    draw.text((36, height - 40), "Live OSRS Hiscores • Stats may change when you level up", font=small_font, fill=(150, 150, 150))
-
-    output = io.BytesIO()
-    img.save(output, format="PNG", optimize=True)
-    output.seek(0)
-    return output
-
-
-def fetch_osrs_hiscores(player: str) -> list[dict]:
-    """Fetch the public OSRS Hiscores skill data for one account."""
-    encoded = urllib.parse.quote(player, safe="")
-    url = f"https://secure.runescape.com/m=hiscore_oldschool/index_lite.ws?player={encoded}"
-    request = urllib.request.Request(url, headers={"User-Agent": "Discord OSRS Clan Bot/1.0"})
-    with urllib.request.urlopen(request, timeout=12) as response:
-        raw = response.read().decode("utf-8", errors="replace")
-
-    rows = []
-    for line in raw.splitlines():
-        parts = line.strip().split(",")
-        if len(parts) < 3:
-            continue
-        try:
-            rank, level, xp = int(parts[0]), int(parts[1]), int(parts[2])
-        except ValueError:
-            continue
-        rows.append({"rank": rank, "level": level, "xp": xp})
-
-    if len(rows) < len(OSRS_SKILLS):
-        raise ValueError("OSRS Hiscores returned incomplete skill data.")
-
-    return [
-        {"name": name, **rows[i]}
-        for i, name in enumerate(OSRS_SKILLS)
-    ]
-
-
-class PlayerStatsView(discord.ui.View):
-    def __init__(self, player: str, owner_id: int):
-        super().__init__(timeout=300)
-        self.player = player
-        self.owner_id = owner_id
-
-        profile = discord.ui.Button(label="Return to Profile", emoji="👤", style=discord.ButtonStyle.secondary)
-        close = discord.ui.Button(label="Close", emoji="✖️", style=discord.ButtonStyle.danger)
-
-        async def profile_callback(interaction: discord.Interaction):
-            if interaction.user.id != self.owner_id:
-                await interaction.response.send_message("This player view belongs to someone else.", ephemeral=True)
-                return
-            self.stop()
-            await interaction.response.edit_message(
-                embed=await build_player_profile_embed(self.player),
-                view=PlayerProfileView(self.player),
-                attachments=[],
-            )
-
-        async def close_callback(interaction: discord.Interaction):
-            if interaction.user.id != self.owner_id:
-                await interaction.response.send_message("This player view belongs to someone else.", ephemeral=True)
-                return
-            self.stop()
-            await interaction.response.defer()
-            try:
-                await interaction.delete_original_response()
-            except (discord.NotFound, discord.HTTPException):
-                pass
-
-        profile.callback = profile_callback
-        close.callback = close_callback
-        self.add_item(profile)
-        self.add_item(close)
-
-
-async def build_player_profile_embed(player: str):
-    row = get_player_stats(player)
-    if not row or not row["player"]:
-        return discord.Embed(title=f"👤 {player}", description="No data found.", color=discord.Color.red())
-    # Reuse the existing profile builder by rendering it into a temporary
-    # interaction is unnecessarily complex; this compact embed is only used
-    # for the Return to Profile button after the stats image is shown.
-    player_name = row["player"]
-    loot = int(row["loot_gp"] or 0)
-    drops = int(row["loot_drops"] or 0)
-    deaths = int(row["deaths"] or 0)
-    death_value = int(row["death_value_gp"] or 0)
-    pvp_kills = get_player_pvp_kills(player_name)
-    weekly_wins = get_weekly_loot_win_count(player_name)
-    next_loot = _next_milestone(loot, LOOT_MILESTONES)
-    loot_progress = "████████████ **MAX**" if next_loot is None else f"`{_progress_bar(loot, next_loot)}`\n**{format_gp(loot)} / {format_gp(next_loot)} GP** • Next milestone: **{format_gp(next_loot)} GP**"
-    next_pvp = _next_milestone(pvp_kills, PVP_KILL_MILESTONES)
-    pvp_progress = "████████████ **MAX**" if next_pvp is None else f"`{_progress_bar(pvp_kills, next_pvp)}`\n**{pvp_kills:,} / {next_pvp:,} kills** • Next milestone: **{next_pvp:,} kills**"
-    embed = discord.Embed(title=f"👤 {player_name}", description="**PLAYER PROFILE**\n━━━━━━━━━━━━━━━━━━━━", color=discord.Color.blurple(), timestamp=datetime.now(timezone.utc))
-    embed.add_field(name="💰 LOOT PROGRESS", value=loot_progress, inline=False)
-    embed.add_field(name="⚔️ PVP PROGRESS", value=pvp_progress, inline=False)
-    embed.add_field(name="📊 STATISTICS", value=(f"💰 **Total Loot:** {format_gp(loot)} GP\n🎁 **Loot Drops:** {drops:,}\n💀 **Deaths:** {deaths:,}\n💸 **PvP GP Lost:** {format_gp(death_value)} GP\n⚔️ **PvP Kills:** {pvp_kills:,}\n🏆 **Weekly Loot Wins:** {weekly_wins:,}"), inline=False)
-    linked_discord_id = get_linked_discord_id(player_name)
-    embed.add_field(name="🔗 DISCORD", value=f"<@{linked_discord_id}>" if linked_discord_id else "Not linked", inline=True)
-    if linked_discord_id:
-        accounts = get_linked_player_accounts(int(linked_discord_id))
-        if accounts:
-            embed.add_field(name="👥 LINKED OSRS ACCOUNTS", value="\n".join(f"• **{a}**" for a in accounts), inline=False)
-    embed.set_footer(text="Personal Dink statistics")
-    return embed
-
-
-class PlayerProfileStatsButton(discord.ui.Button):
-    def __init__(self, player: str):
-        super().__init__(label="Show Stats", emoji="📊", style=discord.ButtonStyle.primary)
-        self.player = player
-
-    async def callback(self, interaction: discord.Interaction):
-        _log_interaction_readable(interaction, "Profile Show Stats", player=self.player)
-        await interaction.response.defer()
-        try:
-            stats = await asyncio.to_thread(fetch_osrs_hiscores, self.player)
-            image = await asyncio.to_thread(build_osrs_stats_image, self.player, stats)
-            file = discord.File(image, filename="osrs_stats.png")
-            embed = discord.Embed(title=f"📊 {self.player} — OSRS STATS", color=discord.Color.dark_gold())
-            embed.set_image(url="attachment://osrs_stats.png")
-            embed.set_footer(text="Live OSRS Hiscores")
-            await interaction.edit_original_response(embed=embed, view=PlayerStatsView(self.player, interaction.user.id), attachments=[file])
-        except Exception as e:
-            print(f"OSRS stats error for {self.player}: {type(e).__name__}: {e}")
-            await interaction.followup.send(
-                f"❌ Couldn't load the OSRS Hiscores for **{self.player}**. Make sure the account name is correct and the account appears on the OSRS Hiscores.",
-                ephemeral=True,
-            )
-
-
 class ProfileCloseButton(discord.ui.Button):
     def __init__(self):
         super().__init__(
@@ -3563,7 +3343,6 @@ class PlayerProfileWeeklyButton(discord.ui.Button):
 class PlayerProfileView(discord.ui.View):
     def __init__(self, player: str):
         super().__init__(timeout=300)
-        self.add_item(PlayerProfileStatsButton(player))
         self.add_item(PlayerProfileWeeklyButton(player))
         self.add_item(PlayerProfileDropsButton(player))
         self.add_item(ProfileCloseButton())
