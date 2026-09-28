@@ -1108,11 +1108,12 @@ def get_player_loot_events(player: str):
 class PlayerDropsPages(discord.ui.View):
     """Paginated private view for all drops belonging to one player."""
 
-    def __init__(self, player, rows, owner_id):
+    def __init__(self, player, rows, owner_id, return_to_profile=False):
         super().__init__(timeout=300)
         self.player = player
         self.rows = list(rows)
         self.owner_id = owner_id
+        self.return_to_profile = return_to_profile
         self.page = 0
         self.per_page = 10
         self._refresh_buttons()
@@ -1209,6 +1210,17 @@ class PlayerDropsPages(discord.ui.View):
                 view=self,
             )
 
+        async def return_profile_callback(interaction):
+            _log_interaction_readable(interaction, "Return to Profile", player=self.player)
+            if not await self._check_owner(interaction):
+                return
+            self.stop()
+            await send_player_stats(
+                interaction,
+                self.player,
+                edit_existing=True,
+            )
+
         async def close_callback(interaction):
             _log_interaction_readable(interaction, "Close")
             if not await self._check_owner(interaction):
@@ -1218,8 +1230,6 @@ class PlayerDropsPages(discord.ui.View):
             try:
                 await interaction.delete_original_response()
             except (discord.NotFound, discord.HTTPException):
-                # If Discord has already removed the ephemeral response,
-                # there is nothing left to delete.
                 pass
 
         previous.callback = previous_callback
@@ -1228,6 +1238,16 @@ class PlayerDropsPages(discord.ui.View):
 
         self.add_item(previous)
         self.add_item(next_button)
+
+        if self.return_to_profile:
+            return_profile = discord.ui.Button(
+                label="Return to Profile",
+                emoji="👤",
+                style=discord.ButtonStyle.primary,
+            )
+            return_profile.callback = return_profile_callback
+            self.add_item(return_profile)
+
         self.add_item(close)
 
     async def _check_owner(self, interaction):
@@ -2913,7 +2933,6 @@ class PlayerProfileDropsButton(discord.ui.Button):
             label="Show All Drops",
             emoji="💎",
             style=discord.ButtonStyle.secondary,
-            custom_id=f"profile_show_all_drops:{player[:70]}",
         )
         self.player = player
 
@@ -2932,11 +2951,11 @@ class PlayerProfileDropsButton(discord.ui.Button):
             player=self.player,
             rows=rows,
             owner_id=interaction.user.id,
+            return_to_profile=True,
         )
-        await interaction.response.send_message(
+        await interaction.response.edit_message(
             embed=view.build_embed(),
             view=view,
-            ephemeral=True,
         )
 
 
@@ -2947,7 +2966,7 @@ class PlayerProfileView(discord.ui.View):
         self.add_item(ProfileCloseButton())
 
 
-async def send_player_stats(interaction: discord.Interaction, player: str):
+async def send_player_stats(interaction: discord.Interaction, player: str, edit_existing: bool = False):
     row = get_player_stats(player)
 
     if not row or not row["player"]:
@@ -3065,11 +3084,17 @@ async def send_player_stats(interaction: discord.Interaction, player: str):
 
     embed.set_footer(text="Personal Dink statistics")
 
-    await interaction.response.send_message(
-        embed=embed,
-        view=PlayerProfileView(player_name),
-        ephemeral=True,
-    )
+    if edit_existing:
+        await interaction.response.edit_message(
+            embed=embed,
+            view=PlayerProfileView(player_name),
+        )
+    else:
+        await interaction.response.send_message(
+            embed=embed,
+            view=PlayerProfileView(player_name),
+            ephemeral=True,
+        )
 
 
 @bot.tree.command(name="namechange", description="Merge an old OSRS username into a new username.")
