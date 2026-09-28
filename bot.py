@@ -2897,9 +2897,10 @@ class ProfileCloseButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.edit_message(
-            content="Profile closed.",
+            content=None,
             embed=None,
             view=None,
+            attachments=[],
         )
 
 
