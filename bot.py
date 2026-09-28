@@ -1106,28 +1106,73 @@ def get_player_loot_events(player: str):
 
 
 class PlayerDropsPages(discord.ui.View):
-    """Paginated private view for all drops belonging to one player."""
+    """Paginated private view for one player's recorded drops."""
+
+    FILTERS = [
+        ("All", 0),
+        ("10M+", 10_000_000),
+        ("50M+", 50_000_000),
+        ("100M+", 100_000_000),
+    ]
+
+    SORTS = [
+        ("Newest", "newest"),
+        ("Highest GP", "highest"),
+        ("Lowest GP", "lowest"),
+    ]
 
     def __init__(self, player, rows, owner_id, return_to_profile=False):
         super().__init__(timeout=300)
         self.player = player
-        self.rows = list(rows)
+        self.all_rows = list(rows)
         self.owner_id = owner_id
         self.return_to_profile = return_to_profile
         self.page = 0
         self.per_page = 10
+        self.filter_index = 0
+        self.sort_mode = "newest"
         self._refresh_buttons()
+
+    @property
+    def rows(self):
+        minimum_gp = self.FILTERS[self.filter_index][1]
+        rows = [
+            row for row in self.all_rows
+            if int(row["value_gp"] or 0) >= minimum_gp
+        ]
+
+        if self.sort_mode == "highest":
+            rows.sort(
+                key=lambda row: int(row["value_gp"] or 0),
+                reverse=True,
+            )
+        elif self.sort_mode == "lowest":
+            rows.sort(
+                key=lambda row: int(row["value_gp"] or 0),
+            )
+        else:
+            rows.sort(
+                key=lambda row: (
+                    str(row["created_at"] or ""),
+                    str(row["message_id"] or ""),
+                ),
+                reverse=True,
+            )
+
+        return rows
 
     @property
     def total_pages(self):
         return max(1, (len(self.rows) + self.per_page - 1) // self.per_page)
 
     def build_embed(self):
+        rows = self.rows
         start = self.page * self.per_page
-        page_rows = self.rows[start:start + self.per_page]
+        page_rows = rows[start:start + self.per_page]
 
-        total = sum(row["value_gp"] or 0 for row in self.rows)
+        total = sum(int(row["value_gp"] or 0) for row in rows)
         weekly_wins = get_weekly_loot_win_count(self.player)
+
         guild_id = None
         drops_channel = bot.get_channel(DROPS_CHANNEL_ID)
         if drops_channel and getattr(drops_channel, "guild", None):
@@ -1147,24 +1192,40 @@ class PlayerDropsPages(discord.ui.View):
                 f"**{item}** • [Show drop]({jump_url})"
             )
 
+        if not lines:
+            lines.append("No drops match the selected filter.")
+
+        filter_name = self.FILTERS[self.filter_index][0]
+        sort_name = next(
+            label for label, value in self.SORTS if value == self.sort_mode
+        )
+
         embed = discord.Embed(
             title=f"💎 {self.player} — ALL DROPS",
             description=(
-                f"**{len(self.rows):,} "
-                f"{'drop' if len(self.rows) == 1 else 'drops'}** • "
-                f"**{format_gp(total)} GP** total\n"
+                f"**{len(rows):,} matching "
+                f"{'drop' if len(rows) == 1 else 'drops'}** • "
+                f"**{format_gp(total)} GP**\n"
                 f"🏆 **Weekly Loot Wins: {weekly_wins}**\n"
+                f"🔎 **Filter:** {filter_name} • **Sort:** {sort_name}\n"
                 f"⚠️ Only Dink drops of **500K GP+** are recorded.\n\n"
                 + "\n".join(lines)
             ),
             color=discord.Color.green(),
             timestamp=datetime.now(timezone.utc),
         )
-        embed.set_footer(
-            text=f"Page {self.page + 1}/{self.total_pages} • "
-                 f"Showing {start + 1}-{min(start + self.per_page, len(self.rows))} "
-                 f"of {len(self.rows)} drops"
-        )
+
+        if rows:
+            shown_start = start + 1
+            shown_end = min(start + self.per_page, len(rows))
+            footer = (
+                f"Page {self.page + 1}/{self.total_pages} • "
+                f"Showing {shown_start}-{shown_end} of {len(rows)} matching drops"
+            )
+        else:
+            footer = "No drops match the selected filter."
+
+        embed.set_footer(text=footer)
         return embed
 
     def _refresh_buttons(self):
@@ -1175,17 +1236,14 @@ class PlayerDropsPages(discord.ui.View):
             emoji="◀️",
             style=discord.ButtonStyle.secondary,
             disabled=self.page <= 0,
+            row=0,
         )
         next_button = discord.ui.Button(
             label="Next",
             emoji="▶️",
             style=discord.ButtonStyle.secondary,
             disabled=self.page >= self.total_pages - 1,
-        )
-        close = discord.ui.Button(
-            label="Close",
-            emoji="✖️",
-            style=discord.ButtonStyle.danger,
+            row=0,
         )
 
         async def previous_callback(interaction):
@@ -1210,16 +1268,44 @@ class PlayerDropsPages(discord.ui.View):
                 view=self,
             )
 
-        async def return_profile_callback(interaction):
-            _log_interaction_readable(interaction, "Return to Profile", player=self.player)
-            if not await self._check_owner(interaction):
-                return
-            self.stop()
-            await send_player_stats(
-                interaction,
-                self.player,
-                edit_existing=True,
+        previous.callback = previous_callback
+        next_button.callback = next_callback
+
+        self.add_item(previous)
+        self.add_item(next_button)
+
+        if self.return_to_profile:
+            return_profile = discord.ui.Button(
+                label="Return to Profile",
+                emoji="👤",
+                style=discord.ButtonStyle.primary,
+                row=0,
             )
+
+            async def return_profile_callback(interaction):
+                _log_interaction_readable(
+                    interaction,
+                    "Return to Profile",
+                    player=self.player,
+                )
+                if not await self._check_owner(interaction):
+                    return
+                self.stop()
+                await send_player_stats(
+                    interaction,
+                    self.player,
+                    edit_existing=True,
+                )
+
+            return_profile.callback = return_profile_callback
+            self.add_item(return_profile)
+
+        close = discord.ui.Button(
+            label="Close",
+            emoji="✖️",
+            style=discord.ButtonStyle.danger,
+            row=0,
+        )
 
         async def close_callback(interaction):
             _log_interaction_readable(interaction, "Close")
@@ -1232,23 +1318,72 @@ class PlayerDropsPages(discord.ui.View):
             except (discord.NotFound, discord.HTTPException):
                 pass
 
-        previous.callback = previous_callback
-        next_button.callback = next_callback
         close.callback = close_callback
-
-        self.add_item(previous)
-        self.add_item(next_button)
-
-        if self.return_to_profile:
-            return_profile = discord.ui.Button(
-                label="Return to Profile",
-                emoji="👤",
-                style=discord.ButtonStyle.primary,
-            )
-            return_profile.callback = return_profile_callback
-            self.add_item(return_profile)
-
         self.add_item(close)
+
+        filter_select = discord.ui.Select(
+            placeholder="Filter drops...",
+            min_values=1,
+            max_values=1,
+            row=1,
+            options=[
+                discord.SelectOption(
+                    label=label,
+                    value=str(index),
+                    emoji="💎" if index == 0 else "💰",
+                    default=index == self.filter_index,
+                )
+                for index, (label, _) in enumerate(self.FILTERS)
+            ],
+        )
+
+        async def filter_callback(interaction):
+            if not await self._check_owner(interaction):
+                return
+            self.filter_index = int(filter_select.values[0])
+            self.page = 0
+            self._refresh_buttons()
+            await interaction.response.edit_message(
+                embed=self.build_embed(),
+                view=self,
+            )
+
+        filter_select.callback = filter_callback
+        self.add_item(filter_select)
+
+        sort_select = discord.ui.Select(
+            placeholder="Sort drops...",
+            min_values=1,
+            max_values=1,
+            row=2,
+            options=[
+                discord.SelectOption(
+                    label=label,
+                    value=value,
+                    emoji={
+                        "newest": "🕒",
+                        "highest": "📈",
+                        "lowest": "📉",
+                    }[value],
+                    default=value == self.sort_mode,
+                )
+                for label, value in self.SORTS
+            ],
+        )
+
+        async def sort_callback(interaction):
+            if not await self._check_owner(interaction):
+                return
+            self.sort_mode = sort_select.values[0]
+            self.page = 0
+            self._refresh_buttons()
+            await interaction.response.edit_message(
+                embed=self.build_embed(),
+                view=self,
+            )
+
+        sort_select.callback = sort_callback
+        self.add_item(sort_select)
 
     async def _check_owner(self, interaction):
         if interaction.user.id != self.owner_id:
@@ -1502,7 +1637,7 @@ async def update_leaderboard():
                 "━━━━━━━━━━━━━━━━━━━━\n"
                 "**TOTAL LOOT RANKING**\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
-                "Highest recorded loot value per player.\n\n"
+                "Total loot accumulated per OSRS player across all recorded Dink drops.\n\n"
                 "⚠️ Only Dink drops of **500K GP+** are recorded."
             ),
             color=discord.Color.green(),
@@ -1554,7 +1689,7 @@ async def update_leaderboard():
                 "━━━━━━━━━━━━━━━━━━━━\n"
                 "**WEEKLY LOOT RANKING**\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
-                "Combined loot value per member this week.\n"
+                "Combined loot value per member this week, including all linked OSRS accounts.\n"
                 f"⏱️ **Resets in: {weekly_reset_countdown()}**\n\n"
             )
 
@@ -1595,7 +1730,7 @@ async def update_leaderboard():
                 "━━━━━━━━━━━━━━━━━━━━\n"
                 "**MOST DEATHS**\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
-                "Player deaths reported by Dink, ranked by death count."
+                "Total deaths reported by Dink, ranked by death count. PvP loss is shown when available."
             ),
             color=discord.Color.red(),
             timestamp=datetime.now(timezone.utc),
@@ -1640,7 +1775,7 @@ async def update_leaderboard():
                 "━━━━━━━━━━━━━━━━━━━━\n"
                 "**PERSONAL RECORD DROPS**\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
-                "Each player's single most valuable recorded drop.\n\n"
+                "Highest-value single Dink drop recorded for each player.\n\n"
                 "⚠️ Only Dink drops of **500K GP+** are recorded."
             ),
             color=discord.Color.purple(),
@@ -1677,7 +1812,7 @@ async def update_leaderboard():
                 "━━━━━━━━━━━━━━━━━━━━\n"
                 "**TOP ACTIVITY PER PLAYER**\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
-                "The activity where each player has earned the most recorded GP."
+                "The activity where each player has earned the most recorded loot GP."
             ),
             color=discord.Color.teal(),
             timestamp=datetime.now(timezone.utc),
@@ -1698,8 +1833,11 @@ async def update_leaderboard():
         else:
             activity_embed.description = "No loot drops have been imported yet."
 
+        updated_timestamp = int(datetime.now(timezone.utc).timestamp())
+        updated_footer = f"🔄 Updated <t:{updated_timestamp}:R>"
+
         for embed in (loot_embed, death_embed, biggest_embed, activity_embed):
-            embed.set_footer(text="Updated automatically")
+            embed.set_footer(text=updated_footer)
 
         embeds = {
             "loot": loot_embed,
@@ -2906,6 +3044,228 @@ def _next_milestone(current: int, milestones):
     return None
 
 
+def get_player_weekly_card_stats(player: str):
+    """
+    Return the current week's personal stats.
+
+    If the player is linked to Discord, all linked OSRS accounts are combined
+    exactly like the weekly leaderboard. Otherwise only this OSRS player is used.
+    """
+    now = datetime.now()
+    week_start = (now - timedelta(days=now.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    next_week = week_start + timedelta(days=7)
+
+    discord_id = get_linked_discord_id(player)
+    conn = db()
+    try:
+        if discord_id:
+            row = conn.execute(
+                """
+                SELECT
+                    COALESCE(SUM(e.value_gp), 0) AS loot_gp,
+                    COUNT(*) AS loot_drops,
+                    COALESCE(MAX(e.value_gp), 0) AS biggest_drop,
+                    MAX(e.created_at) AS last_drop
+                FROM events e
+                JOIN player_discord_links pdl
+                  ON pdl.player_key = LOWER(REPLACE(e.player, ' ', ''))
+                WHERE e.event_type='loot'
+                  AND pdl.discord_id = ?
+                  AND datetime(e.created_at) >= datetime(?)
+                  AND datetime(e.created_at) < datetime(?)
+                """,
+                (
+                    discord_id,
+                    week_start.strftime("%Y-%m-%d %H:%M:%S"),
+                    next_week.strftime("%Y-%m-%d %H:%M:%S"),
+                ),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """
+                SELECT
+                    COALESCE(SUM(value_gp), 0) AS loot_gp,
+                    COUNT(*) AS loot_drops,
+                    COALESCE(MAX(value_gp), 0) AS biggest_drop,
+                    MAX(created_at) AS last_drop
+                FROM events
+                WHERE event_type='loot'
+                  AND LOWER(REPLACE(player, ' ', '')) = LOWER(REPLACE(?, ' ', ''))
+                  AND datetime(created_at) >= datetime(?)
+                  AND datetime(created_at) < datetime(?)
+                """,
+                (
+                    player,
+                    week_start.strftime("%Y-%m-%d %H:%M:%S"),
+                    next_week.strftime("%Y-%m-%d %H:%M:%S"),
+                ),
+            ).fetchone()
+
+        # Build the complete current-week ranking so the displayed rank is
+        # consistent with the main weekly leaderboard.
+        ranking_rows = conn.execute(
+            """
+            WITH grouped AS (
+                SELECT
+                    CASE
+                        WHEN pdl.discord_id IS NOT NULL
+                            THEN 'discord:' || CAST(pdl.discord_id AS TEXT)
+                        ELSE 'player:' || LOWER(REPLACE(e.player, ' ', ''))
+                    END AS ranking_key,
+                    SUM(e.value_gp) AS loot_gp
+                FROM events e
+                LEFT JOIN player_discord_links pdl
+                    ON pdl.player_key = LOWER(REPLACE(e.player, ' ', ''))
+                WHERE e.event_type='loot'
+                  AND datetime(e.created_at) >= datetime(?)
+                  AND datetime(e.created_at) < datetime(?)
+                GROUP BY ranking_key
+            )
+            SELECT ranking_key, loot_gp
+            FROM grouped
+            ORDER BY loot_gp DESC, ranking_key COLLATE NOCASE
+            """,
+            (
+                week_start.strftime("%Y-%m-%d %H:%M:%S"),
+                next_week.strftime("%Y-%m-%d %H:%M:%S"),
+            ),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    target_key = (
+        f"discord:{discord_id}"
+        if discord_id
+        else f"player:{player_key(player)}"
+    )
+
+    rank = None
+    for index, ranking_row in enumerate(ranking_rows, start=1):
+        if ranking_row["ranking_key"] == target_key:
+            rank = index
+            break
+
+    return {
+        "loot_gp": int(row["loot_gp"] or 0),
+        "loot_drops": int(row["loot_drops"] or 0),
+        "biggest_drop": int(row["biggest_drop"] or 0),
+        "last_drop": row["last_drop"],
+        "rank": rank,
+        "member_count": len(ranking_rows),
+        "linked": discord_id is not None,
+        "discord_id": discord_id,
+        "week_start": week_start,
+        "next_week": next_week,
+    }
+
+
+class PlayerWeeklyView(discord.ui.View):
+    def __init__(self, player: str, owner_id: int):
+        super().__init__(timeout=300)
+        self.player = player
+        self.owner_id = owner_id
+
+        return_profile = discord.ui.Button(
+            label="Return to Profile",
+            emoji="👤",
+            style=discord.ButtonStyle.primary,
+        )
+
+        close = discord.ui.Button(
+            label="Close",
+            emoji="✖️",
+            style=discord.ButtonStyle.danger,
+        )
+
+        async def return_profile_callback(interaction):
+            _log_interaction_readable(
+                interaction,
+                "Return to Profile",
+                player=self.player,
+            )
+            if not await self._check_owner(interaction):
+                return
+            self.stop()
+            await send_player_stats(
+                interaction,
+                self.player,
+                edit_existing=True,
+            )
+
+        async def close_callback(interaction):
+            _log_interaction_readable(interaction, "Close Weekly Card")
+            if not await self._check_owner(interaction):
+                return
+            self.stop()
+            await interaction.response.defer()
+            try:
+                await interaction.delete_original_response()
+            except (discord.NotFound, discord.HTTPException):
+                pass
+
+        return_profile.callback = return_profile_callback
+        close.callback = close_callback
+
+        self.add_item(return_profile)
+        self.add_item(close)
+
+    async def _check_owner(self, interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "This player lookup belongs to someone else.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def on_timeout(self):
+        self.stop()
+
+
+def build_player_weekly_embed(player: str):
+    stats = get_player_weekly_card_stats(player)
+    weekly_wins = get_weekly_loot_win_count(player)
+
+    rank_text = (
+        f"**#{stats['rank']} of {stats['member_count']}**"
+        if stats["rank"] is not None
+        else "**Unranked**"
+    )
+
+    linked_text = (
+        "Combined with all linked OSRS accounts."
+        if stats["linked"]
+        else "Based on this OSRS account."
+    )
+
+    description = (
+        "**PERSONAL WEEKLY CARD**\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"📅 **{stats['week_start'].strftime('%d-%m-%Y')} → "
+        f"{(stats['next_week'] - timedelta(days=1)).strftime('%d-%m-%Y')}**\n"
+        f"{linked_text}\n\n"
+        f"💰 **TOTAL THIS WEEK:** {format_gp(stats['loot_gp'])} GP\n"
+        f"🎁 **DROPS THIS WEEK:** {stats['loot_drops']:,}\n"
+        f"🏅 **WEEKLY RANK:** {rank_text}\n"
+        f"💎 **BIGGEST DROP:** {format_gp(stats['biggest_drop'])} GP\n"
+        f"🏆 **WEEKLY LOOT WINS:** {weekly_wins:,}\n\n"
+        f"⏱️ **Resets in:** {weekly_reset_countdown()}"
+    )
+
+    embed = discord.Embed(
+        title=f"📅 {player} — THIS WEEK",
+        description=description,
+        color=discord.Color.gold(),
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.set_footer(
+        text=f"🔄 Updated <t:{int(datetime.now(timezone.utc).timestamp())}:R>"
+    )
+    return embed
+
+
 class ProfileCloseButton(discord.ui.Button):
     def __init__(self):
         super().__init__(
@@ -2959,9 +3319,31 @@ class PlayerProfileDropsButton(discord.ui.Button):
         )
 
 
+class PlayerProfileWeeklyButton(discord.ui.Button):
+    def __init__(self, player: str):
+        super().__init__(
+            label="This Week",
+            emoji="📅",
+            style=discord.ButtonStyle.secondary,
+        )
+        self.player = player
+
+    async def callback(self, interaction: discord.Interaction):
+        _log_interaction_readable(
+            interaction,
+            "Profile This Week",
+            player=self.player,
+        )
+        await interaction.response.edit_message(
+            embed=build_player_weekly_embed(self.player),
+            view=PlayerWeeklyView(self.player, interaction.user.id),
+        )
+
+
 class PlayerProfileView(discord.ui.View):
     def __init__(self, player: str):
         super().__init__(timeout=300)
+        self.add_item(PlayerProfileWeeklyButton(player))
         self.add_item(PlayerProfileDropsButton(player))
         self.add_item(ProfileCloseButton())
 
@@ -3293,9 +3675,33 @@ async def refreshnames_error(interaction: discord.Interaction, error: app_comman
         print(f"Refresh names command error: {error}")
 
 
+async def player_name_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+):
+    """Autocomplete OSRS names from the bot's recorded player list."""
+    try:
+        players = get_all_leaderboard_players()
+    except Exception:
+        return []
+
+    current_key = current.casefold().replace(" ", "")
+    if current_key:
+        players = [
+            player for player in players
+            if current_key in player.casefold().replace(" ", "")
+        ]
+
+    return [
+        app_commands.Choice(name=player[:100], value=player[:100])
+        for player in players[:25]
+    ]
+
+
 @bot.tree.command(name="player", description="Show detailed stats for a player.")
+@app_commands.autocomplete(player=player_name_autocomplete)
 @app_commands.describe(
-    player="OSRS player name (type it manually)",
+    player="OSRS player name",
     member="Discord member linked to the OSRS player",
 )
 async def player_command(
