@@ -579,12 +579,20 @@ async def process_message(message: discord.Message) -> bool:
     changed = await save_event(message, parsed)
 
     if changed:
-        await process_milestone_announcements(
-            message,
-            parsed,
-            previous_loot_total=previous_loot_total,
-            previous_pvp_kills=previous_pvp_kills,
-        )
+        try:
+            await process_milestone_announcements(
+                message,
+                parsed,
+                previous_loot_total=previous_loot_total,
+                previous_pvp_kills=previous_pvp_kills,
+            )
+        except Exception as exc:
+            # Announcement code must never prevent the stored event from reaching
+            # update_leaderboard() in on_message().
+            print(
+                f"ERROR: Milestone announcement processing failed for "
+                f"message {message.id}: {exc}"
+            )
 
     return changed
 
@@ -642,6 +650,23 @@ def claim_milestones(player: str, milestone_type: str, thresholds):
         conn.close()
 
 
+def unclaim_milestones(player: str, milestone_type: str, thresholds):
+    """Release milestone claims when the Discord announcement could not be sent."""
+    if not thresholds:
+        return
+    conn = db()
+    try:
+        for threshold in thresholds:
+            conn.execute(
+                """DELETE FROM milestone_announcements
+                   WHERE player_key = ? AND milestone_type = ? AND threshold = ?""",
+                (player_key(player), milestone_type, threshold),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 async def send_milestone_announcement(
     message: discord.Message,
     player: str,
@@ -686,6 +711,7 @@ async def process_milestone_announcements(
     previous_loot_total=None,
     previous_pvp_kills=None,
 ):
+    """Send milestone announcements without ever blocking event/leaderboard processing."""
     player = parsed["player"]
     event_type = parsed["event_type"]
 
@@ -699,20 +725,28 @@ async def process_milestone_announcements(
         claimed = claim_milestones(player, "loot_total", crossed)
 
         for threshold in claimed:
-            await send_milestone_announcement(
-                message,
-                player,
-                "🏆 LOOT MILESTONE",
-                (
-                    f"**{player}** has reached **{format_gp(threshold)} GP** "
-                    f"in total recorded loot! 💰"
-                ),
-                discord.Color.gold(),
-            )
+            try:
+                await send_milestone_announcement(
+                    message,
+                    player,
+                    "🏆 LOOT MILESTONE",
+                    (
+                        f"**{player}** has reached **{format_gp(threshold)} GP** "
+                        f"in total recorded loot! 💰"
+                    ),
+                    discord.Color.gold(),
+                )
+            except Exception as exc:
+                # Do not let an announcement failure interrupt leaderboard updates.
+                print(
+                    f"ERROR: Loot milestone announcement failed for {player} "
+                    f"at {threshold}: {exc}"
+                )
+                unclaim_milestones(player, "loot_total", [threshold])
 
         # Every individual loot drop worth 20M+ gets a big-drop announcement.
-        # The message ID is used as the unique claim key so edited/reprocessed
-        # Dink messages cannot create the same announcement twice.
+        # The message ID is the unique claim key so edited/reprocessed Dink
+        # messages cannot create the same announcement twice.
         value_gp = int(parsed.get("value_gp") or 0)
         if value_gp >= BIG_DROP_ANNOUNCEMENT_MIN_GP:
             claimed = claim_milestones(
@@ -727,33 +761,43 @@ async def process_milestone_announcements(
                     or "Loot drop"
                 )
                 drop_url = build_show_drop_url(message)
+
+                # Resolve the mention BEFORE building the embed. The previous
+                # version referenced `mention` before assigning it, which caused
+                # UnboundLocalError and stopped the rest of on_message().
+                discord_id = get_linked_discord_id(player)
+                mention = f"<@{discord_id}>" if discord_id is not None else ""
+
                 embed = discord.Embed(
                     title="💎 BIG DROP!",
                     description=(
                         f"**{player}** just received **{item}** worth "
                         f"**{format_gp(value_gp)} GP**! 🎉\n\n"
                         f"[Show Drop]({drop_url})\n\n"
-                        f"{mention or ''}"
+                        f"{mention}"
                     ),
                     color=discord.Color.purple(),
                     timestamp=datetime.now(timezone.utc),
                 )
-                channel = bot.get_channel(WEEKLY_LOOT_ANNOUNCEMENT_CHANNEL_ID)
-                if channel is None:
-                    try:
+
+                try:
+                    channel = bot.get_channel(WEEKLY_LOOT_ANNOUNCEMENT_CHANNEL_ID)
+                    if channel is None:
                         channel = await bot.fetch_channel(
                             WEEKLY_LOOT_ANNOUNCEMENT_CHANNEL_ID
                         )
-                    except Exception as exc:
-                        print(f"ERROR: Could not access big-drop channel: {exc}")
-                        return
-                discord_id = get_linked_discord_id(player)
-                mention = f"<@{discord_id}>" if discord_id is not None else None
-
-                embed.description = (
-                    f"{embed.description}\n\n{mention or ''}"
-                )
-                await channel.send(embed=embed)
+                    await channel.send(embed=embed)
+                except Exception as exc:
+                    # The drop is already safely stored. Release the claim so a
+                    # later re-processing can retry the announcement instead of
+                    # permanently losing it. Most importantly, do not re-raise.
+                    print(
+                        f"ERROR: Big-drop announcement failed for {player} "
+                        f"(message {message.id}): {exc}"
+                    )
+                    unclaim_milestones(
+                        player, "big_drop_message", [int(message.id)]
+                    )
 
     elif event_type == "pvp_kill":
         kills = get_player_pvp_kills(player)
@@ -765,16 +809,24 @@ async def process_milestone_announcements(
         claimed = claim_milestones(player, "pvp_kills", crossed)
 
         for threshold in claimed:
-            await send_milestone_announcement(
-                message,
-                player,
-                "⚔️ PVP KILL MILESTONE",
-                (
-                    f"**{player}** has reached **{threshold:,} PvP kills**! "
-                    f"⚔️"
-                ),
-                discord.Color.red(),
-            )
+            try:
+                await send_milestone_announcement(
+                    message,
+                    player,
+                    "⚔️ PVP KILL MILESTONE",
+                    (
+                        f"**{player}** has reached **{threshold:,} PvP kills**! "
+                        f"⚔️"
+                    ),
+                    discord.Color.red(),
+                )
+            except Exception as exc:
+                print(
+                    f"ERROR: PvP milestone announcement failed for {player} "
+                    f"at {threshold}: {exc}"
+                )
+                unclaim_milestones(player, "pvp_kills", [threshold])
+
 
 
 def add_chunked_field(embed: discord.Embed, field_name: str, lines):
