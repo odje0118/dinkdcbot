@@ -2265,27 +2265,6 @@ class ShowIdsView(discord.ui.View):
         self.add_item(next_button)
         self.add_item(close_button)
 
-    def make_embed(self):
-        total = len(self.players)
-        linked = sum(
-            1 for player in self.players if get_linked_discord_id(player)
-        )
-        start = self.page * self.PAGE_SIZE + 1 if total else 0
-        end = min((self.page + 1) * self.PAGE_SIZE, total)
-
-        embed = discord.Embed(
-            title="🔗 PLAYER DISCORD ID MANAGER",
-            description=(
-                "Select a leaderboard player below to assign their Discord ID.\n\n"
-                f"**Players:** {total:,} • **Linked:** {linked:,} • "
-                f"**Unlinked:** {total - linked:,}\n"
-                f"Showing **{start:,}–{end:,}** • Page **{self.page + 1}/{self.page_count()}**\n\n"
-                "After selecting a player, paste their Discord User ID. "
-                "Leave it blank to remove an existing link."
-            ),
-            color=discord.Color.blurple(),
-        )
-        return embed
         delete_button = discord.ui.Button(
             label="Delete Player",
             style=discord.ButtonStyle.danger,
@@ -3395,6 +3374,29 @@ def get_player_weekly_card_stats(player: str):
         "week_start": week_start,
         "next_week": next_week,
     }
+
+    def make_embed(self):
+        total = len(self.players)
+        linked = sum(
+            1 for player in self.players if get_linked_discord_id(player)
+        )
+        start = self.page * self.PAGE_SIZE + 1 if total else 0
+        end = min((self.page + 1) * self.PAGE_SIZE, total)
+
+        embed = discord.Embed(
+            title="🔗 PLAYER DISCORD ID MANAGER",
+            description=(
+                "Select a leaderboard player below to assign their Discord ID.\n\n"
+                f"**Players:** {total:,} • **Linked:** {linked:,} • "
+                f"**Unlinked:** {total - linked:,}\n"
+                f"Showing **{start:,}–{end:,}** • Page **{self.page + 1}/{self.page_count()}**\n\n"
+                "After selecting a player, paste their Discord User ID. "
+                "Leave it blank to remove an existing link."
+            ),
+            color=discord.Color.blurple(),
+        )
+        return embed
+
 
 
 class PlayerWeeklyView(discord.ui.View):
