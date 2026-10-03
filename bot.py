@@ -985,11 +985,30 @@ def remove_linked_discord_id(player: str):
 
 
 def get_all_leaderboard_players():
+    """Return all players known to the leaderboard, including manually-added players."""
     rows = get_stats()
-    return sorted(
-        [row["player"] for row in rows if row["player"]],
-        key=lambda name: name.casefold(),
-    )
+    players = {
+        row["player"]
+        for row in rows
+        if row["player"]
+    }
+
+    # Also include players that have been manually added/linked through
+    # /showids, even if they do not have any Dink events yet.
+    conn = db()
+    try:
+        linked_rows = conn.execute(
+            "SELECT player_name FROM player_discord_links"
+        ).fetchall()
+        players.update(
+            row["player_name"]
+            for row in linked_rows
+            if row["player_name"]
+        )
+    finally:
+        conn.close()
+
+    return sorted(players, key=lambda name: name.casefold())
 
 
 def get_stats():
@@ -1999,6 +2018,81 @@ class DiscordIdModal(discord.ui.Modal):
         await self.parent_view.refresh(interaction)
 
 
+class AddPlayerModal(discord.ui.Modal):
+    """Modal used by /showids to manually add a player who has no Dink events yet."""
+
+    def __init__(self, parent_view):
+        super().__init__(title="Add Player")
+        self.parent_view = parent_view
+
+        self.player_name = discord.ui.TextInput(
+            label="OSRS Username",
+            placeholder="Enter the exact OSRS username",
+            required=True,
+            max_length=40,
+        )
+        self.discord_id = discord.ui.TextInput(
+            label="Discord User ID",
+            placeholder="Paste the Discord user ID",
+            required=True,
+            max_length=20,
+        )
+
+        self.add_item(self.player_name)
+        self.add_item(self.discord_id)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        player = self.player_name.value.strip()
+        raw_discord_id = self.discord_id.value.strip()
+
+        if not player:
+            await interaction.response.send_message(
+                "❌ Please enter an OSRS username.",
+                ephemeral=True,
+            )
+            return
+
+        if not raw_discord_id.isdigit():
+            await interaction.response.send_message(
+                "❌ The Discord ID must contain numbers only.",
+                ephemeral=True,
+            )
+            return
+
+        discord_id = int(raw_discord_id)
+
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "❌ This command can only be used in a server.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            member = interaction.guild.get_member(discord_id)
+            if member is None:
+                member = await interaction.guild.fetch_member(discord_id)
+        except (discord.NotFound, discord.HTTPException):
+            await interaction.response.send_message(
+                f"❌ I could not find Discord member `{discord_id}` in this server.",
+                ephemeral=True,
+            )
+            return
+
+        # If the OSRS name is an existing alias, keep the canonical name.
+        player = resolve_player_alias(player)
+
+        set_linked_discord_id(player, member.id)
+
+        await interaction.response.send_message(
+            f"✅ Added **{player}** and linked it to {member.mention} (`{member.id}`).\n"
+            "The player will now appear in `/showids` even without any Dink events.",
+            ephemeral=True,
+        )
+
+        await self.parent_view.refresh(interaction)
+
+
 class ShowIdsView(discord.ui.View):
     PAGE_SIZE = 25
 
@@ -2067,22 +2161,43 @@ class ShowIdsView(discord.ui.View):
             self.select.callback = select_callback
             self.add_item(self.select)
 
+        add_player_button = discord.ui.Button(
+            label="➕ Add Player",
+            style=discord.ButtonStyle.success,
+            row=1,
+        )
+
+        async def add_player_callback(interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                await interaction.response.send_message(
+                    "❌ This menu belongs to the person who opened it.",
+                    ephemeral=True,
+                )
+                return
+
+            await interaction.response.send_modal(
+                AddPlayerModal(self)
+            )
+
+        add_player_button.callback = add_player_callback
+        self.add_item(add_player_button)
+
         previous_button = discord.ui.Button(
             label="◀ Previous",
             style=discord.ButtonStyle.secondary,
             disabled=self.page <= 0,
-            row=1,
+            row=2,
         )
         next_button = discord.ui.Button(
             label="Next ▶",
             style=discord.ButtonStyle.secondary,
             disabled=self.page >= self.page_count() - 1,
-            row=1,
+            row=2,
         )
         close_button = discord.ui.Button(
             label="Close",
             style=discord.ButtonStyle.danger,
-            row=1,
+            row=2,
         )
 
         async def previous_callback(interaction: discord.Interaction):
@@ -2146,7 +2261,8 @@ class ShowIdsView(discord.ui.View):
         embed = discord.Embed(
             title="🔗 PLAYER DISCORD ID MANAGER",
             description=(
-                "Select a leaderboard player below to assign their Discord ID.\n\n"
+                "Select a leaderboard player below to assign their Discord ID, "
+                "or use **➕ Add Player** to manually add someone who has no Dink events yet.\n\n"
                 f"**Players:** {total:,} • **Linked:** {linked:,} • "
                 f"**Unlinked:** {total - linked:,}\n"
                 f"Showing **{start:,}–{end:,}** • Page **{self.page + 1}/{self.page_count()}**\n\n"
