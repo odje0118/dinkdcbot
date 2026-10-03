@@ -984,37 +984,6 @@ def remove_linked_discord_id(player: str):
     conn.close()
 
 
-def delete_player_from_database(player: str):
-    """Delete a player and all of their stored leaderboard data."""
-    key = player_key(player)
-    if not key:
-        return
-
-    conn = db()
-    conn.execute(
-        "DELETE FROM events WHERE LOWER(REPLACE(player, ' ', '')) = ?",
-        (key,),
-    )
-    conn.execute(
-        "DELETE FROM player_discord_links WHERE player_key = ?",
-        (key,),
-    )
-    conn.execute(
-        "DELETE FROM weekly_loot_wins WHERE player_id = ?",
-        (key,),
-    )
-    conn.execute(
-        "DELETE FROM milestone_announcements WHERE player_key = ?",
-        (key,),
-    )
-    conn.execute(
-        "DELETE FROM player_aliases WHERE old_key = ? OR LOWER(REPLACE(current_name, ' ', '')) = ?",
-        (key, key),
-    )
-    conn.commit()
-    conn.close()
-
-
 def get_all_leaderboard_players():
     """Return all known players, including manually linked players with no events."""
     rows = get_stats()
@@ -2071,64 +2040,6 @@ class DiscordIdModal(discord.ui.Modal):
         await self.parent_view.refresh(interaction)
 
 
-class DeletePlayerConfirmView(discord.ui.View):
-    def __init__(self, interaction: discord.Interaction, player: str):
-        super().__init__(timeout=60)
-        self.owner_id = interaction.user.id
-        self.player = player
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.owner_id:
-            await interaction.response.send_message(
-                "❌ Only the person who opened this confirmation can use these buttons.",
-                ephemeral=True,
-            )
-            return False
-        return True
-
-    @discord.ui.button(label="Delete Player", style=discord.ButtonStyle.danger, emoji="🗑️")
-    async def confirm_delete(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ):
-        delete_player_from_database(self.player)
-        _log_interaction_readable(
-            interaction,
-            "Delete player from database",
-            player=self.player,
-        )
-
-        for child in self.children:
-            child.disabled = True
-
-        await interaction.response.edit_message(
-            content=f"🗑️ **{self.player}** has been permanently deleted from the database.",
-            view=self,
-        )
-
-        # Refresh the main leaderboard message if possible.
-        try:
-            if leaderboard_view and getattr(leaderboard_view, "message", None):
-                await leaderboard_view.refresh(interaction)
-        except Exception as e:
-            print(f"[DELETE PLAYER REFRESH ERROR] {e}")
-
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
-    async def cancel_delete(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ):
-        for child in self.children:
-            child.disabled = True
-
-        await interaction.response.edit_message(
-            content="❌ Player deletion cancelled.",
-            view=self,
-        )
-
-
 class ShowIdsView(discord.ui.View):
     PAGE_SIZE = 25
 
@@ -2264,61 +2175,6 @@ class ShowIdsView(discord.ui.View):
         self.add_item(previous_button)
         self.add_item(next_button)
         self.add_item(close_button)
-
-        delete_button = discord.ui.Button(
-            label="Delete Player",
-            style=discord.ButtonStyle.danger,
-            emoji="🗑️",
-            row=4,
-        )
-
-        async def delete_callback(interaction: discord.Interaction):
-            if interaction.user.id != self.owner_id:
-                await interaction.response.send_message(
-                    "❌ Only the person who opened this menu can delete a player.",
-                    ephemeral=True,
-                )
-                return
-
-            if not self.players:
-                await interaction.response.send_message(
-                    "❌ There are no players to delete.",
-                    ephemeral=True,
-                )
-                return
-
-            # Use the currently selected player when available.
-            selected = None
-            if self.select and self.select.values:
-                selected = self.select.values[0]
-
-            if not selected:
-                await interaction.response.send_message(
-                    "❌ Select a player first, then click **Delete Player**.",
-                    ephemeral=True,
-                )
-                return
-
-            embed = discord.Embed(
-                title="⚠️ Confirm Player Deletion",
-                description=(
-                    f"Are you sure you want to permanently delete **{selected}**?\n\n"
-                    "This removes their recorded loot, deaths, Discord link, "
-                    "weekly wins, milestone announcements and aliases from the database.\n\n"
-                    "**This cannot be undone.**"
-                ),
-                color=discord.Color.red(),
-            )
-
-            await interaction.response.send_message(
-                embed=embed,
-                view=DeletePlayerConfirmView(interaction, selected),
-                ephemeral=True,
-            )
-
-        delete_button.callback = delete_callback
-        self.add_item(delete_button)
-
 
     def make_embed(self):
         total = len(self.players)
@@ -3396,8 +3252,6 @@ def get_player_weekly_card_stats(player: str):
         "week_start": week_start,
         "next_week": next_week,
     }
-
-
 
 
 class PlayerWeeklyView(discord.ui.View):
